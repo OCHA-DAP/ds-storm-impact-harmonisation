@@ -12,7 +12,10 @@
 </head>
 <body>
     <div class="container">
-        <h1>Cyclone Exposure Dashboard</h1>
+        <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:12px;">
+            <h1 style="margin-bottom:0;">Cyclone Exposure Dashboard</h1>
+            <span id="last-updated" style="font-size:12px; color:#888888;"></span>
+        </div>
 
         <div id="summary-stats" class="summary-stats"></div>
 
@@ -70,7 +73,12 @@
         fetch('assets/exposure_data.json')
             .then(response => response.json())
             .then(data => {
-                exposureData = data;
+                exposureData = data.data;
+                if (data.last_updated) {
+                    const d = new Date(data.last_updated);
+                    document.getElementById('last-updated').textContent =
+                        'Last updated: ' + d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+                }
                 renderStormsTable();
             })
             .catch(error => {
