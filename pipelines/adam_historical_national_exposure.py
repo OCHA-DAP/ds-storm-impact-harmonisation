@@ -36,7 +36,7 @@ load_dotenv()
 ADAM_BASE = "https://api.adam.geospatial.wfp.org/api"
 COLLECTION = "adam.adam_ts_events"
 PAGE_SIZE = 100
-OUTPUT_CSV = f"{PROJECT_PREFIX}/adam_historical_national_exposure.csv"
+OUTPUT_CSV = f"{PROJECT_PREFIX}/processed/adam_historical_national_exposure.csv"
 SOURCE = "NOAA"
 
 
@@ -152,9 +152,14 @@ def fetch_national_exposure(row):
             "iso3": name_to_iso3(str(adm0)),
             "country_name": adm0,
         }
+        # Standardise to kt column names
+        kt_names = {
+            "POP_60_KMH": "pop_34kt",
+            "POP_90_KMH": "pop_50kt",
+            "POP_120_KMH": "pop_64kt",
+        }
         for col in pop_cols:
-            out_col = col.lower().replace("_kmh", "kmh")
-            rec[out_col] = int(r[col]) if col in r and pd.notna(r[col]) else None
+            rec[kt_names[col]] = int(r[col]) if col in r and pd.notna(r[col]) else None
         out.append(rec)
     return out
 
@@ -214,7 +219,7 @@ def join_ibtracs(df):
 
     df_storms = (
         df_sel.drop_duplicates(subset=["storm_name"])
-        .drop(columns=["iso3", "country_name", "pop_90kmh", "pop_120kmh", "pop_60kmh"])
+        .drop(columns=["iso3", "country_name", "pop_34kt", "pop_50kt", "pop_64kt"])
         .reset_index()
     )
     print(f"Dataset has {len(df_storms)} unique storms.")
