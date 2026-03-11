@@ -28,7 +28,7 @@ GDACS_BASE = "https://www.gdacs.org/gdacsapi/api"
 FROM_DATE = "2010-01-01"
 TO_DATE = "2026-12-31"
 SOURCE = "NOAA"  # 'NOAA' = Atlantic/E.Pacific | 'JTWC' = W.Pacific/Indian Ocean
-OUTPUT_CSV = f"{PROJECT_PREFIX}/gdacs_historical_national_exposure.csv"
+OUTPUT_CSV = f"{PROJECT_PREFIX}/processed/gdacs_historical_national_exposure.csv"
 
 # Wind speed (kt) implied by each buffer key
 BUFFER_KT = {

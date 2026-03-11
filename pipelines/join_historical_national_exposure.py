@@ -21,6 +21,7 @@ Join key: all shared metadata columns (everything except population exposure col
 
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import ocha_stratus as stratus
@@ -33,7 +34,7 @@ from constants import PROJECT_PREFIX
 load_dotenv()
 
 ADAM_BLOB = f"{PROJECT_PREFIX}/processed/adam_historical_national_exposure.csv"
-GDACS_BLOB = "ds-cyclone-exposure/gdacs_historical_national_exposure.csv"
+GDACS_BLOB = f"{PROJECT_PREFIX}/processed/gdacs_historical_national_exposure.csv"
 OUTPUT_CSV = f"{PROJECT_PREFIX}/processed/combined_historical_national_exposure.csv"
 OUTPUT_JSON = Path(__file__).resolve().parents[1] / "assets" / "exposure_data.json"
 
@@ -113,16 +114,17 @@ def main():
     )
     df_merged["source"] = df_merged["source_gdacs"].fillna(df_merged["source_adam"])
 
-    df_merged = df_merged.drop(
-        columns=[
-            "alert_level_gdacs",
-            "alert_level_adam",
-            "storm_name_gdacs",
-            "storm_name_adam",
-            "source_gdacs",
-            "source_adam",
-        ]
-    )
+    drop_cols = [
+        "alert_level_gdacs",
+        "alert_level_adam",
+        "storm_name_gdacs",
+        "storm_name_adam",
+        "source_gdacs",
+        "source_adam",
+    ]
+    # Drop index columns if present (artefacts from earlier pipeline versions)
+    drop_cols += [c for c in ("index_gdacs", "index_adam") if c in df_merged.columns]
+    df_merged = df_merged.drop(columns=drop_cols)
 
     # pop_50kt comes only from ADAM (no GDACS equivalent at that threshold);
     # add _adam suffix explicitly so all pop columns are consistently source-labelled.
@@ -143,8 +145,12 @@ def main():
     df_json = df_json.where(pd.notna(df_json), None)
     data_records = df_json.to_dict(orient="records")
 
+    output = {
+        "last_updated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "data": data_records,
+    }
     with open(OUTPUT_JSON, "w") as f:
-        json.dump(data_records, f, indent=2)
+        json.dump(output, f, indent=2)
     print(f"Exported {len(data_records)} records to {OUTPUT_JSON}")
 
     print("Done.")
