@@ -105,14 +105,27 @@ def deduplicate(df_all):
 
 _iso3_cache = {}
 
+# Hard-coded overrides for names that pycountry cannot resolve or resolves incorrectly.
+# None means the ISO3 is genuinely ambiguous and should be left blank.
+_ISO3_OVERRIDES = {
+    "Puerto Rico (USA)": "PRI",
+    "United States Virgin Islands (USA)": "VIR",
+    "Saint Pierre et Miquelon": "SPM",
+    "Azores Islands": "PRT",
+    "Clipperton Island": "CPT",
+}
+
 
 def name_to_iso3(country_name):
     if country_name in _iso3_cache:
         return _iso3_cache[country_name]
-    try:
-        code = pycountry.countries.search_fuzzy(country_name)[0].alpha_3
-    except LookupError:
-        code = None
+    if country_name in _ISO3_OVERRIDES:
+        code = _ISO3_OVERRIDES[country_name]
+    else:
+        try:
+            code = pycountry.countries.search_fuzzy(country_name)[0].alpha_3
+        except LookupError:
+            code = None
     _iso3_cache[country_name] = code
     return code
 
