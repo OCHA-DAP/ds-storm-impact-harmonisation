@@ -353,6 +353,32 @@ td a:hover {
     display: none;
 }
 
+.summary-stats {
+    display: flex;
+    gap: 24px;
+    margin-bottom: 14px;
+}
+
+.stat-item {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+
+.stat-value {
+    font-size: 22px;
+    font-weight: 700;
+    line-height: 1.1;
+    color: #333;
+}
+
+.stat-label {
+    font-size: 12px;
+    color: #888888;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
 .dot-tooltip {
     position: fixed;
     background: #333;

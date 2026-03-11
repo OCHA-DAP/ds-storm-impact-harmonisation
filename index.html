@@ -14,6 +14,8 @@
     <div class="container">
         <h1>Cyclone Exposure Dashboard</h1>
 
+        <div id="summary-stats" class="summary-stats"></div>
+
         <div class="main-content">
             <div class="section left-section">
                 <div class="section-header">
@@ -109,14 +111,26 @@
                 }
 
                 // Check if this row has ADAM or GDACS data
-                const hasAdamData = row.pop_120kmh != null || row.pop_60kmh != null || row.pop_90kmh != null;
-                const hasGdacsData = row.pop_34kt != null || row.pop_64kt != null;
+                const hasAdamData = row.pop_64kt_adam != null || row.pop_34kt_adam != null || row.pop_50kt_adam != null;
+                const hasGdacsData = row.pop_34kt_gdacs != null || row.pop_64kt_gdacs != null;
 
                 if (hasAdamData) stormMap[row.sid].hasAdam = true;
                 if (hasGdacsData) stormMap[row.sid].hasGdacs = true;
             });
 
             const storms = Object.values(stormMap);
+
+            // Summary stats
+            const totalStorms   = storms.length;
+            const withAdam      = storms.filter(s => s.hasAdam).length;
+            const withGdacs     = storms.filter(s => s.hasGdacs).length;
+            const withBoth      = storms.filter(s => s.hasAdam && s.hasGdacs).length;
+            document.getElementById('summary-stats').innerHTML = `
+                <div class="stat-item"><span class="stat-value">${totalStorms}</span><span class="stat-label">Total storms</span></div>
+                <div class="stat-item"><span class="stat-value" style="color:#007CE0">${withAdam}</span><span class="stat-label">With ADAM data</span></div>
+                <div class="stat-item"><span class="stat-value" style="color:#1EBFB3">${withGdacs}</span><span class="stat-label">With GDACS data</span></div>
+                <div class="stat-item"><span class="stat-value">${withBoth}</span><span class="stat-label">With both sources</span></div>
+            `;
 
             // Sort storms
             storms.sort((a, b) => {
@@ -258,19 +272,19 @@
                     countryMap[row.iso3] = {
                         country_name: row.country_name,
                         iso3: row.iso3,
-                        pop_120kmh: row.pop_120kmh,
-                        pop_90kmh: row.pop_90kmh,
-                        pop_60kmh: row.pop_60kmh,
-                        pop_64kt: row.pop_64kt,
-                        pop_34kt: row.pop_34kt
+                        pop_64kt_adam: row.pop_64kt_adam,
+                        pop_50kt_adam: row.pop_50kt_adam,
+                        pop_34kt_adam: row.pop_34kt_adam,
+                        pop_64kt_gdacs: row.pop_64kt_gdacs,
+                        pop_34kt_gdacs: row.pop_34kt_gdacs
                     };
                 } else {
                     // Merge data if we have multiple rows for the same country
-                    if (row.pop_120kmh != null) countryMap[row.iso3].pop_120kmh = row.pop_120kmh;
-                    if (row.pop_90kmh != null) countryMap[row.iso3].pop_90kmh = row.pop_90kmh;
-                    if (row.pop_60kmh != null) countryMap[row.iso3].pop_60kmh = row.pop_60kmh;
-                    if (row.pop_64kt != null) countryMap[row.iso3].pop_64kt = row.pop_64kt;
-                    if (row.pop_34kt != null) countryMap[row.iso3].pop_34kt = row.pop_34kt;
+                    if (row.pop_64kt_adam != null) countryMap[row.iso3].pop_64kt_adam = row.pop_64kt_adam;
+                    if (row.pop_50kt_adam != null) countryMap[row.iso3].pop_50kt_adam = row.pop_50kt_adam;
+                    if (row.pop_34kt_adam != null) countryMap[row.iso3].pop_34kt_adam = row.pop_34kt_adam;
+                    if (row.pop_64kt_gdacs != null) countryMap[row.iso3].pop_64kt_gdacs = row.pop_64kt_gdacs;
+                    if (row.pop_34kt_gdacs != null) countryMap[row.iso3].pop_34kt_gdacs = row.pop_34kt_gdacs;
                 }
             });
 
@@ -317,9 +331,9 @@
                 html += `
                     <tr>
                         <td><span class="country-link" onclick="openCountryModal('${safeIso3}', '${safeName}')">${country.country_name || '-'}</span></td>
-                        <td class="comparison-cell">${createStackedValues(country.pop_120kmh, country.pop_64kt)}</td>
-                        <td class="comparison-cell">${createStackedValues(country.pop_90kmh, null)}</td>
-                        <td class="comparison-cell">${createStackedValues(country.pop_60kmh, country.pop_34kt)}</td>
+                        <td class="comparison-cell">${createStackedValues(country.pop_64kt_adam, country.pop_64kt_gdacs)}</td>
+                        <td class="comparison-cell">${createStackedValues(country.pop_50kt_adam, null)}</td>
+                        <td class="comparison-cell">${createStackedValues(country.pop_34kt_adam, country.pop_34kt_gdacs)}</td>
                     </tr>
                 `;
             });
@@ -333,9 +347,9 @@
         }
 
         const WIND_LEVELS = [
-            { value: '34', label: '34 kt', adamKey: 'pop_60kmh',  gdacsKey: 'pop_34kt' },
-            { value: '50', label: '50 kt', adamKey: 'pop_90kmh',  gdacsKey: null       },
-            { value: '64', label: '64 kt', adamKey: 'pop_120kmh', gdacsKey: 'pop_64kt' },
+            { value: '34', label: '34 kt', adamKey: 'pop_34kt_adam', gdacsKey: 'pop_34kt_gdacs' },
+            { value: '50', label: '50 kt', adamKey: 'pop_50kt_adam', gdacsKey: null              },
+            { value: '64', label: '64 kt', adamKey: 'pop_64kt_adam', gdacsKey: 'pop_64kt_gdacs' },
         ];
 
         let _modalCountryData = [];
