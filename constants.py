@@ -1,1 +1,1 @@
-PROJECT_PREFIX = "ds-storm-impact-harmonization"
+PROJECT_PREFIX = "ds-storm-impact-harmonisation"
