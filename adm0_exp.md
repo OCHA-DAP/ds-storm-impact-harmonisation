@@ -40,12 +40,6 @@ gdf_buffers = stratus.load_geoparquet_from_blob(blob_name)
 ```
 
 ```python
-url = "https://data.fieldmaps.io/adm0/osm/intl/adm0_polygons.parquet"
-
-adm0 = gpd.read_parquet(f"simplecache::{url}")
-```
-
-```python
 url = "https://naturalearth.s3.amazonaws.com/10m_cultural/ne_10m_admin_0_countries.zip"
 adm0 = gpd.read_file(url)
 ```
@@ -57,7 +51,12 @@ adm0.plot(ax=ax)
 
 ```python
 iso3 = "hti"
-adm0[adm0["ISO_A3"] == iso3.upper()].plot()
+adm0[adm0["ADM0_A3"] == iso3.upper()].plot()
+```
+
+```python
+iso3 = "usa"
+adm0[adm0["ADM0_A3"] == iso3.upper()].plot()
 ```
 
 ```python
@@ -242,6 +241,12 @@ df_exp_all
 ```
 
 ```python
+df_exp_all[(df_exp_all["ADM0_A3"] == "USA") & (df_exp_all["speed"] == 64)].sort_values(
+    "pop_exposed", ascending=False
+)
+```
+
+```python
 blob_name = "ds-storm-impact-harmonisation/processed/adm0_ibtracs_exp_all.parquet"
 ```
 
@@ -250,5 +255,106 @@ stratus.upload_parquet_to_blob(df_exp_all, blob_name)
 ```
 
 ```python
-df_exp_all["sid"].min()
+df_exp_all = stratus.load_parquet_from_blob(blob_name)
+```
+
+```python
+query = """
+SELECT *
+FROM storms.ibtracs_tracks_geo
+"""
+with stratus.get_engine(stage="prod").connect() as con:
+    gdf_tracks = gpd.read_postgis(query, con, geom_col="geometry")
+```
+
+```python
+iso3 = "mex"
+adm_sel = adm0[adm0["ADM0_A3"] == iso3.upper()]
+```
+
+```python
+", ".join([x for x in adm0["ADM0_A3"].unique()])
+```
+
+```python
+da_clip = da_wp_global.rio.clip(adm_sel.geometry, all_touched=True)
+```
+
+```python
+sid = "2025280N11269"
+```
+
+```python
+df_exp_all[(df_exp_all["sid"] == sid) & (df_exp_all["ADM0_A3"] == iso3.upper())]
+```
+
+```python
+buffers_sel = gdf_buffers[gdf_buffers["sid"] == sid]
+tracks_sel = gdf_tracks[gdf_tracks["sid"] == sid]
+```
+
+```python
+fig, ax = plt.subplots(dpi=300)
+
+# minx, miny, maxx, maxy = adm_sel.total_bounds
+minx, miny, maxx, maxy = buffers_sel.total_bounds
+
+adm_sel.boundary.plot(ax=ax, linewidth=0.5, color="k")
+buffers_sel.plot(column="speed", ax=ax, alpha=0.2)
+tracks_sel.plot(ax=ax, markersize=2)
+# da_clip.where(da_clip > 0).plot(ax=ax)
+
+pad = 5  # degrees
+ax.set_xlim(minx - pad, maxx + pad)
+ax.set_ylim(miny - pad, maxy + pad)
+```
+
+```python
+da_clip_buffer = da_clip.rio.clip(buffers_sel.geometry)
+```
+
+```python
+da_clip_buffer.where(da_clip_buffer > 0).sum().compute()
+```
+
+```python
+df_exp_all[(df_exp_all["sid"] == sid) & (df_exp_all["ADM0_A3"] == iso3.upper())]
+```
+
+```python
+sid = "2025294N14290"
+```
+
+```python
+adm_sel = adm0[adm0["ADM0_A3"] == iso3.upper()]
+buffers_sel = gdf_buffers[gdf_buffers["sid"] == sid]
+tracks_sel = gdf_tracks[gdf_tracks["sid"] == sid]
+```
+
+```python
+fig, ax = plt.subplots(dpi=300)
+
+minx, miny, maxx, maxy = adm_sel.total_bounds
+# minx, miny, maxx, maxy = buffers_sel.total_bounds
+
+adm_sel.boundary.plot(ax=ax, linewidth=0.5, color="k")
+buffers_sel.plot(column="speed", ax=ax, alpha=0.2)
+tracks_sel.plot(ax=ax, markersize=2)
+da_clip.where(da_clip > 0).plot(ax=ax)
+
+pad = 0.5  # degrees
+ax.set_xlim(minx - pad, maxx + pad)
+ax.set_ylim(miny - pad, maxy + pad)
+```
+
+```python
+da_clip_buffer = da_clip.rio.clip(buffers_sel.geometry)
+```
+
+```python
+da_clip_buffer.where(da_clip_buffer > 0).sum().compute()
+```
+
+```python
+
 ```
