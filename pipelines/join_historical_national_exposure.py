@@ -31,7 +31,7 @@ import pandas as pd
 from dotenv import load_dotenv
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from constants import PROJECT_PREFIX
+from constants import CHD_ZERO_FILL_ISO3, PROJECT_PREFIX
 
 load_dotenv()
 
@@ -164,6 +164,43 @@ def main():
 
     df_merged = df_merged.merge(df_chd_wide, on=["sid", "iso3"], how="outer")
     print(f"Combined columns after CHD join, final shape: {df_merged.shape}")
+
+    # -----------------------------------------------------------------------
+    # 5b. Zero-fill missing CHD estimates
+    #
+    # Fill CHD pop columns with 0 where all three conditions hold:
+    #   1. The SID exists in storms.ibtracs_storms
+    #   2. ADAM or GDACS already has an estimate for that storm x country row
+    #   3. The ISO3 is in the CHD_ZERO_FILL_ISO3 allowlist
+    # -----------------------------------------------------------------------
+    engine = stratus.get_engine("prod")
+    with engine.connect() as conn:
+        ibtracs_sids = set(
+            pd.read_sql("SELECT DISTINCT sid FROM storms.ibtracs_storms", conn)[
+                "sid"
+            ].dropna()
+        )
+    print(f"ibtracs SIDs loaded: {len(ibtracs_sids)}")
+
+    adam_gdacs_cols = [
+        "pop_34kt_adam",
+        "pop_50kt_adam",
+        "pop_64kt_adam",
+        "pop_34kt_gdacs",
+        "pop_64kt_gdacs",
+    ]
+    chd_pop_cols = ["pop_34kt_chd", "pop_50kt_chd", "pop_64kt_chd"]
+
+    fill_mask = (
+        df_merged["sid"].isin(ibtracs_sids)
+        & df_merged["iso3"].isin(CHD_ZERO_FILL_ISO3)
+        & df_merged[adam_gdacs_cols].notna().any(axis=1)
+    )
+    for col in chd_pop_cols:
+        df_merged.loc[fill_mask & df_merged[col].isna(), col] = 0
+
+    filled = fill_mask.sum()
+    print(f"Zero-filled CHD estimates for {filled} storm x country rows")
 
     # -----------------------------------------------------------------------
     # 6. Save combined dataset to Azure blob storage
