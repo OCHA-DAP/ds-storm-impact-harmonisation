@@ -41,6 +41,10 @@
                             <div class="legend-color gdacs"></div>
                             <span>GDACS</span>
                         </div>
+                        <div class="source-legend-item">
+                            <div class="legend-color chd"></div>
+                            <span>CHD</span>
+                        </div>
                     </div>
                 </div>
                 <div id="country-table-container" class="table-container">
@@ -114,16 +118,19 @@
                         alert_level: row.alert_level,
                         hasAdam: false,
                         hasGdacs: false,
+                        hasChd: false,
                         countries: []
                     };
                 }
 
-                // Check if this row has ADAM or GDACS data
+                // Check if this row has ADAM, GDACS, or CHD data
                 const hasAdamData = row.pop_64kt_adam != null || row.pop_34kt_adam != null || row.pop_50kt_adam != null;
                 const hasGdacsData = row.pop_34kt_gdacs != null || row.pop_64kt_gdacs != null;
+                const hasChdData = row.pop_34kt_chd != null || row.pop_50kt_chd != null || row.pop_64kt_chd != null;
 
                 if (hasAdamData) stormMap[row.sid].hasAdam = true;
                 if (hasGdacsData) stormMap[row.sid].hasGdacs = true;
+                if (hasChdData) stormMap[row.sid].hasChd = true;
             });
 
             const storms = Object.values(stormMap);
@@ -132,12 +139,14 @@
             const totalStorms   = storms.length;
             const withAdam      = storms.filter(s => s.hasAdam).length;
             const withGdacs     = storms.filter(s => s.hasGdacs).length;
-            const withBoth      = storms.filter(s => s.hasAdam && s.hasGdacs).length;
+            const withChd       = storms.filter(s => s.hasChd).length;
+            const withBoth      = storms.filter(s => s.hasAdam && s.hasGdacs && s.hasChd).length;
             document.getElementById('summary-stats').innerHTML = `
                 <div class="stat-item"><span class="stat-value">${totalStorms}</span><span class="stat-label">Total storms</span></div>
                 <div class="stat-item"><span class="stat-value" style="color:#007CE0">${withAdam}</span><span class="stat-label">With ADAM data</span></div>
                 <div class="stat-item"><span class="stat-value" style="color:#1EBFB3">${withGdacs}</span><span class="stat-label">With GDACS data</span></div>
-                <div class="stat-item"><span class="stat-value">${withBoth}</span><span class="stat-label">With both sources</span></div>
+                <div class="stat-item"><span class="stat-value" style="color:#E05C4B">${withChd}</span><span class="stat-label">With CHD data</span></div>
+                <div class="stat-item"><span class="stat-value">${withBoth}</span><span class="stat-label">With all sources</span></div>
             `;
 
             // Sort storms
@@ -177,6 +186,10 @@
                         aVal = a.hasGdacs ? 1 : 0;
                         bVal = b.hasGdacs ? 1 : 0;
                         break;
+                    case 'hasChd':
+                        aVal = a.hasChd ? 1 : 0;
+                        bVal = b.hasChd ? 1 : 0;
+                        break;
                     default:
                         return 0;
                 }
@@ -211,6 +224,7 @@
                             <th class="${getSortClass('from_date')}" onclick="sortStorms('from_date')">Date</th>
                             <th class="${getSortClass('hasAdam')}" onclick="sortStorms('hasAdam')" style="text-align: center;">ADAM</th>
                             <th class="${getSortClass('hasGdacs')}" onclick="sortStorms('hasGdacs')" style="text-align: center;">GDACS</th>
+                            <th class="${getSortClass('hasChd')}" onclick="sortStorms('hasChd')" style="text-align: center;">CHD</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -232,6 +246,7 @@
                         <td>${date}</td>
                         <td style="text-align: center;"><span class="indicator ${storm.hasAdam ? 'adam-available' : 'unavailable'}"></span></td>
                         <td style="text-align: center;"><span class="indicator ${storm.hasGdacs ? 'gdacs-available' : 'unavailable'}"></span></td>
+                        <td style="text-align: center;"><span class="indicator ${storm.hasChd ? 'chd-available' : 'unavailable'}"></span></td>
                     </tr>
                 `;
             });
@@ -284,7 +299,10 @@
                         pop_50kt_adam: row.pop_50kt_adam,
                         pop_34kt_adam: row.pop_34kt_adam,
                         pop_64kt_gdacs: row.pop_64kt_gdacs,
-                        pop_34kt_gdacs: row.pop_34kt_gdacs
+                        pop_34kt_gdacs: row.pop_34kt_gdacs,
+                        pop_64kt_chd: row.pop_64kt_chd,
+                        pop_50kt_chd: row.pop_50kt_chd,
+                        pop_34kt_chd: row.pop_34kt_chd
                     };
                 } else {
                     // Merge data if we have multiple rows for the same country
@@ -293,6 +311,9 @@
                     if (row.pop_34kt_adam != null) countryMap[row.iso3].pop_34kt_adam = row.pop_34kt_adam;
                     if (row.pop_64kt_gdacs != null) countryMap[row.iso3].pop_64kt_gdacs = row.pop_64kt_gdacs;
                     if (row.pop_34kt_gdacs != null) countryMap[row.iso3].pop_34kt_gdacs = row.pop_34kt_gdacs;
+                    if (row.pop_64kt_chd != null) countryMap[row.iso3].pop_64kt_chd = row.pop_64kt_chd;
+                    if (row.pop_50kt_chd != null) countryMap[row.iso3].pop_50kt_chd = row.pop_50kt_chd;
+                    if (row.pop_34kt_chd != null) countryMap[row.iso3].pop_34kt_chd = row.pop_34kt_chd;
                 }
             });
 
@@ -305,17 +326,20 @@
                 return Math.round(val).toLocaleString();
             };
 
-            const createStackedValues = (adamVal, gdacsVal) => {
+            const createStackedValues = (adamVal, gdacsVal, chdVal) => {
                 const adamDisplay = adamVal != null ? formatNumber(adamVal) : '-';
                 const gdacsDisplay = gdacsVal != null ? formatNumber(gdacsVal) : '-';
+                const chdDisplay = chdVal != null ? formatNumber(chdVal) : '-';
 
                 const adamClass = adamVal != null ? 'adam-value' : 'no-data';
                 const gdacsClass = gdacsVal != null ? 'gdacs-value' : 'no-data';
+                const chdClass = chdVal != null ? 'chd-value' : 'no-data';
 
                 return `
                     <div class="stacked-values">
                         <div class="${adamClass}">${adamDisplay}</div>
                         <div class="${gdacsClass}">${gdacsDisplay}</div>
+                        <div class="${chdClass}">${chdDisplay}</div>
                     </div>
                 `;
             };
@@ -339,9 +363,9 @@
                 html += `
                     <tr>
                         <td><span class="country-link" onclick="openCountryModal('${safeIso3}', '${safeName}')">${country.country_name || '-'}</span></td>
-                        <td class="comparison-cell">${createStackedValues(country.pop_64kt_adam, country.pop_64kt_gdacs)}</td>
-                        <td class="comparison-cell">${createStackedValues(country.pop_50kt_adam, null)}</td>
-                        <td class="comparison-cell">${createStackedValues(country.pop_34kt_adam, country.pop_34kt_gdacs)}</td>
+                        <td class="comparison-cell">${createStackedValues(country.pop_64kt_adam, country.pop_64kt_gdacs, country.pop_64kt_chd)}</td>
+                        <td class="comparison-cell">${createStackedValues(country.pop_50kt_adam, null, country.pop_50kt_chd)}</td>
+                        <td class="comparison-cell">${createStackedValues(country.pop_34kt_adam, country.pop_34kt_gdacs, country.pop_34kt_chd)}</td>
                     </tr>
                 `;
             });
@@ -355,9 +379,9 @@
         }
 
         const WIND_LEVELS = [
-            { value: '34', label: '34 kt', adamKey: 'pop_34kt_adam', gdacsKey: 'pop_34kt_gdacs' },
-            { value: '50', label: '50 kt', adamKey: 'pop_50kt_adam', gdacsKey: null              },
-            { value: '64', label: '64 kt', adamKey: 'pop_64kt_adam', gdacsKey: 'pop_64kt_gdacs' },
+            { value: '34', label: '34 kt', adamKey: 'pop_34kt_adam', gdacsKey: 'pop_34kt_gdacs', chdKey: 'pop_34kt_chd' },
+            { value: '50', label: '50 kt', adamKey: 'pop_50kt_adam', gdacsKey: null,              chdKey: 'pop_50kt_chd' },
+            { value: '64', label: '64 kt', adamKey: 'pop_64kt_adam', gdacsKey: 'pop_64kt_gdacs', chdKey: 'pop_64kt_chd' },
         ];
 
         let _modalCountryData = [];
@@ -389,18 +413,21 @@
             const pw = W - m.left - m.right;
             const ph = H - m.top - m.bottom;
 
-            // Two strip centers
-            const adamX  = pw * 0.3;
-            const gdacsX = pw * 0.7;
-            const jitterRange = pw * 0.18;
+            // Three strip centers
+            const adamX  = pw * 0.2;
+            const gdacsX = pw * 0.5;
+            const chdX   = pw * 0.8;
+            const jitterRange = pw * 0.14;
 
-            // Scale across both strips for the selected wind level
+            // Scale across all strips for the selected wind level
             let maxVal = 0;
             _modalCountryData.forEach(row => {
                 const av = row[level.adamKey];
                 const gv = level.gdacsKey ? row[level.gdacsKey] : null;
+                const cv = level.chdKey ? row[level.chdKey] : null;
                 if (av != null && av > maxVal) maxVal = av;
                 if (gv != null && gv > maxVal) maxVal = gv;
+                if (cv != null && cv > maxVal) maxVal = cv;
             });
             if (maxVal === 0) maxVal = 1;
 
@@ -441,6 +468,7 @@
                 if (_modalHighlightSid != null && row.sid === _modalHighlightSid) selectedName = row.name;
                 addDot(adamX,  row[level.adamKey],                            row.name, row.season, '#007CE0', row.sid);
                 addDot(gdacsX, level.gdacsKey ? row[level.gdacsKey] : null,  row.name, row.season, '#1EBFB3', row.sid);
+                addDot(chdX,   level.chdKey  ? row[level.chdKey]   : null,  row.name, row.season, '#E05C4B', row.sid);
             });
 
             // X-axis labels
@@ -448,11 +476,13 @@
             const xLabels = `
                 <text x="${adamX.toFixed(1)}"  y="${ph + 22}" text-anchor="middle" font-size="13" font-weight="600" fill="#007CE0">ADAM</text>
                 <text x="${gdacsX.toFixed(1)}" y="${ph + 22}" text-anchor="middle" font-size="13" font-weight="600" fill="${gdacsColor}">GDACS</text>
+                <text x="${chdX.toFixed(1)}"   y="${ph + 22}" text-anchor="middle" font-size="13" font-weight="600" fill="#E05C4B">CHD</text>
             `;
 
-            const noEquivLabel = !level.gdacsKey
-                ? `<text x="${gdacsX.toFixed(1)}" y="${(ph / 2).toFixed(0)}" text-anchor="middle" font-size="12" fill="#CCCCCC">No equivalent</text>`
-                : '';
+            let noEquivLabel = '';
+            if (!level.gdacsKey) {
+                noEquivLabel += `<text x="${gdacsX.toFixed(1)}" y="${(ph / 2).toFixed(0)}" text-anchor="middle" font-size="12" fill="#CCCCCC">No equivalent</text>`;
+            }
 
             // Legend (selected storm only — ADAM/GDACS identified by x-axis labels)
             const legendLabel = selectedName ? selectedName : 'Selected storm';

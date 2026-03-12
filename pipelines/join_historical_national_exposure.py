@@ -1,13 +1,14 @@
 """
-Join ADAM + GDACS — Historical National Exposure
+Join ADAM + GDACS + CHD — Historical National Exposure
 
-Loads national-level population exposure estimates from both the ADAM and GDACS
+Loads national-level population exposure estimates from the ADAM, GDACS, and CHD
 historical pipelines and joins them into a single dataset where each row is one
 storm x one country. Also exports the combined dataset as JSON.
 
 Sources:
     adam_historical_national_exposure.csv  — WFP ADAM wind exposure at 34/50/64 kt
     gdacs_historical_national_exposure.csv — GDACS wind exposure at 34 kt / 64 kt
+    adm0_ibtracs_exp_all.parquet           — CHD wind exposure at 34/50/64 kt
 
 Cleaning applied to ADAM before joining:
     Exposure values must be cumulative (≥ threshold). ADAM stores per-band values,
@@ -17,6 +18,7 @@ Cleaning applied to ADAM before joining:
         pop_50kt = pop_50kt + (pop_64kt or 0)  [only if pop_50kt is non-null]
 
 Join key: all shared metadata columns (everything except population exposure columns)
+CHD join key: sid + iso3 only (CHD does not carry the full metadata set)
 """
 
 import json
@@ -35,6 +37,7 @@ load_dotenv()
 
 ADAM_BLOB = f"{PROJECT_PREFIX}/processed/adam_historical_national_exposure.csv"
 GDACS_BLOB = f"{PROJECT_PREFIX}/processed/gdacs_historical_national_exposure.csv"
+CHD_BLOB = f"{PROJECT_PREFIX}/processed/adm0_ibtracs_exp_all.parquet"
 OUTPUT_CSV = f"{PROJECT_PREFIX}/processed/combined_historical_national_exposure.csv"
 OUTPUT_JSON = Path(__file__).resolve().parents[1] / "assets" / "exposure_data.json"
 
@@ -76,15 +79,36 @@ JOIN_COLS = [
 ]
 
 
+def pivot_chd(df: pd.DataFrame) -> pd.DataFrame:
+    """Pivot CHD data from long format to wide format with source-labelled columns.
+
+    Input has one row per storm x country x wind-speed threshold (34/50/64 kt).
+    Output has one row per storm x country with columns pop_34kt_chd, pop_50kt_chd,
+    pop_64kt_chd.
+    """
+    df_wide = (
+        df.rename(columns={"ADM0_A3": "iso3"})
+        .pivot_table(index=["sid", "iso3"], columns="speed", values="pop_exposed")
+        .reset_index()
+    )
+    df_wide.columns.name = None
+    df_wide = df_wide.rename(
+        columns={34: "pop_34kt_chd", 50: "pop_50kt_chd", 64: "pop_64kt_chd"}
+    )
+    return df_wide
+
+
 def main():
     # -----------------------------------------------------------------------
-    # 1. Load both datasets from blob storage
+    # 1. Load all datasets from blob storage
     # -----------------------------------------------------------------------
     print("Loading datasets from blob storage...")
     df_adam = stratus.load_csv_from_blob(ADAM_BLOB)
     df_gdacs = stratus.load_csv_from_blob(GDACS_BLOB)
+    df_chd = stratus.load_parquet_from_blob(CHD_BLOB)
     print(f"ADAM rows:  {len(df_adam)},  columns: {list(df_adam.columns)}")
     print(f"GDACS rows: {len(df_gdacs)}, columns: {list(df_gdacs.columns)}")
+    print(f"CHD rows:   {len(df_chd)},  columns: {list(df_chd.columns)}")
 
     # -----------------------------------------------------------------------
     # 2. Make ADAM exposure values cumulative
@@ -130,18 +154,29 @@ def main():
     # add _adam suffix explicitly so all pop columns are consistently source-labelled.
     df_merged = df_merged.rename(columns={"pop_50kt": "pop_50kt_adam"})
 
-    print(f"Combined columns, final shape: {df_merged.shape}")
+    print(f"Combined columns after ADAM+GDACS merge: {df_merged.shape}")
 
     # -----------------------------------------------------------------------
-    # 5. Save combined dataset to Azure blob storage
+    # 5. Join CHD data
+    # -----------------------------------------------------------------------
+    df_chd_wide = pivot_chd(df_chd)
+    print(f"CHD wide rows: {len(df_chd_wide)}, columns: {list(df_chd_wide.columns)}")
+
+    df_merged = df_merged.merge(df_chd_wide, on=["sid", "iso3"], how="outer")
+    print(f"Combined columns after CHD join, final shape: {df_merged.shape}")
+
+    # -----------------------------------------------------------------------
+    # 6. Save combined dataset to Azure blob storage
     # -----------------------------------------------------------------------
     print(f"\nSaving {len(df_merged)} rows to {OUTPUT_CSV}...")
     stratus.upload_csv_to_blob(df_merged, OUTPUT_CSV)
 
     # -----------------------------------------------------------------------
-    # 6. Export to JSON for dashboard
+    # 7. Export to JSON for dashboard (only storms with a GDACS event_id)
     # -----------------------------------------------------------------------
-    df_json = df_merged.replace({pd.NA: None, float("nan"): None})
+    df_json = df_merged[df_merged["event_id"].notna()]
+    print(f"Dropped {len(df_merged) - len(df_json)} rows without GDACS event_id")
+    df_json = df_json.replace({pd.NA: None, float("nan"): None})
     df_json = df_json.where(pd.notna(df_json), None)
     data_records = df_json.to_dict(orient="records")
 

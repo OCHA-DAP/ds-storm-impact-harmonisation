@@ -127,6 +127,10 @@ tr:hover {
     background-color: #1EBFB3;
 }
 
+.indicator.chd-available {
+    background-color: #E05C4B;
+}
+
 .indicator.unavailable {
     background-color: #DDDDDD;
 }
@@ -206,6 +210,11 @@ tr:hover {
     font-weight: 600;
 }
 
+.stacked-values .chd-value {
+    color: #E05C4B;
+    font-weight: 600;
+}
+
 .stacked-values .no-data {
     color: #DDDDDD;
 }
@@ -235,6 +244,10 @@ tr:hover {
 
 .legend-color.gdacs {
     background-color: #1EBFB3;
+}
+
+.legend-color.chd {
+    background-color: #E05C4B;
 }
 
 .section-header {
