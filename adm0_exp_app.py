@@ -26,8 +26,10 @@ def _(mo, stratus):
 
 
 @app.cell
-def _(gpd, mo):
-    gdf_buffers = gpd.read_parquet("data/ibtracs_usa_buffers.parquet")
+def _(mo, stratus):
+    gdf_buffers = stratus.load_geoparquet_from_blob(
+        "ds-storm-impact-harmonisation/processed/ibtracs_usa_buffers.parquet"
+    )
     mo.output.replace(mo.md(f"✓ Storm buffers loaded ({len(gdf_buffers):,} rows)"))
     return (gdf_buffers,)
 
@@ -45,15 +47,24 @@ def _(gpd, mo):
 def _(mo, pd, stratus):
     engine = stratus.get_engine(stage="prod")
     with engine.connect() as _con:
-        df_storms = pd.read_sql("SELECT sid, name FROM storms.ibtracs_storms", _con)
+        df_storms = pd.read_sql("SELECT sid, name, genesis_basin FROM storms.ibtracs_storms", _con)
     mo.output.replace(mo.md(f"✓ Storm names loaded ({len(df_storms):,} storms)"))
     return df_storms, engine
 
 
 @app.cell
 def _(df_exp_all, df_storms):
-    df_exp_named = df_exp_all.merge(df_storms, on="sid", how="left")
+    df_exp_named = df_exp_all.merge(df_storms[["sid", "name"]], on="sid", how="left")
     return (df_exp_named,)
+
+
+@app.cell
+def _(mo, stratus):
+    df_historical = stratus.load_csv_from_blob(
+        "ds-storm-impact-harmonisation/processed/combined_historical_national_exposure.csv"
+    )
+    mo.output.replace(mo.md(f"✓ Historical exposure loaded ({len(df_historical):,} rows)"))
+    return (df_historical,)
 
 
 @app.cell
@@ -95,7 +106,7 @@ def _(country_selector, df_exp_named, mo, pd):
             return f"({season}) — {sid}"
 
         _country_storms["label"] = _country_storms.apply(_label, axis=1)
-        _country_storms = _country_storms.sort_values(["season", "label"])
+        _country_storms = _country_storms.sort_values(["season", "label"], ascending=False)
         _storm_map = dict(zip(_country_storms["label"], _country_storms["sid"]))
         storm_selector = mo.ui.dropdown(options=_storm_map, label="Storm")
 
@@ -105,7 +116,7 @@ def _(country_selector, df_exp_named, mo, pd):
 
 
 @app.cell
-def _(adm0, engine, gdf_buffers, gpd, mo, plt, selected_adm0, storm_selector, text):
+def _(adm0, df_storms, engine, gdf_buffers, gpd, mo, plt, selected_adm0, storm_selector, text):
     _GEO_CRS_ANTIMERIDIAN = "+proj=longlat +datum=WGS84 +lon_wrap=180"
 
     _sid = storm_selector.value
@@ -134,6 +145,8 @@ def _(adm0, engine, gdf_buffers, gpd, mo, plt, selected_adm0, storm_selector, te
 
     _country_name = _adm.iloc[0]["NAME"] if not _adm.empty else selected_adm0
     _storm_label = next((k for k, v in storm_selector.options.items() if v == _sid), _sid)
+    _basin_row = df_storms[df_storms["sid"] == _sid]
+    _basin = _basin_row.iloc[0]["genesis_basin"] if not _basin_row.empty else ""
 
     fig, ax = plt.subplots(dpi=150)
 
@@ -151,26 +164,46 @@ def _(adm0, engine, gdf_buffers, gpd, mo, plt, selected_adm0, storm_selector, te
     _pad = 5
     ax.set_xlim(_minx - _pad, _maxx + _pad)
     ax.set_ylim(_miny - _pad, _maxy + _pad)
-    ax.set_title(f"{_country_name} — {_storm_label}")
+    _title = f"{_country_name} — {_storm_label}"
+    if _basin:
+        _title += f" ({_basin})"
+    ax.set_title(_title)
     ax.set_axis_off()
 
     fig
 
 
 @app.cell
-def _(df_exp_all, mo, selected_adm0, storm_selector):
+def _(df_exp_all, df_historical, mo, pd, selected_adm0, storm_selector):
     _sid = storm_selector.value
 
     if _sid is None:
         mo.stop(True)
 
-    _df = (
+    _our = (
         df_exp_all[(df_exp_all["sid"] == _sid) & (df_exp_all["ADM0_A3"] == selected_adm0)]
         [["speed", "pop_exposed"]]
-        .sort_values("speed")
-        .rename(columns={"speed": "Wind speed (kt)", "pop_exposed": "Population exposed"})
-        .reset_index(drop=True)
+        .set_index("speed")
     )
-    _df["Population exposed"] = _df["Population exposed"].map("{:,.0f}".format)
+
+    _hist = df_historical[(df_historical["sid"] == _sid) & (df_historical["iso3"] == selected_adm0)]
+
+    # Build comparison rows for each speed band we have
+    _rows = []
+    for _speed in sorted(_our.index):
+        _row = {"Wind speed (kt)": _speed, "CHD": _our.loc[_speed, "pop_exposed"]}
+        if not _hist.empty:
+            _col_gdacs = f"pop_{_speed}kt_gdacs"
+            _col_adam = f"pop_{_speed}kt_adam"
+            _row["GDACS"] = _hist[_col_gdacs].iloc[0] if _col_gdacs in _hist.columns else pd.NA
+            _row["ADAM"] = _hist[_col_adam].iloc[0] if _col_adam in _hist.columns else pd.NA
+        _rows.append(_row)
+
+    _df = pd.DataFrame(_rows)
+    for _col in ["CHD", "GDACS", "ADAM"]:
+        if _col in _df.columns:
+            _df[_col] = _df[_col].apply(
+                lambda x: f"{x:,.0f}" if pd.notna(x) else "—"
+            )
 
     mo.ui.table(_df, selection=None)
