@@ -1,5 +1,5 @@
 {
-  "last_updated": "2026-03-12T20:34:30Z",
+  "last_updated": "2026-03-16T22:21:35Z",
   "data": [
     {
       "event_id": 1000182.0,
@@ -9030,7 +9030,7 @@
       "iso3": "GTM",
       "country_name": "Guatemala",
       "pop_34kt_gdacs": 100151.0,
-      "pop_64kt_gdacs": -1.0,
+      "pop_64kt_gdacs": null,
       "season": 2022.0,
       "name": "LISA",
       "sid": "2022304N16287",
@@ -13969,7 +13969,7 @@
       "from_date": "2025-05-28T21:00:00",
       "iso3": "MEX",
       "country_name": "Mexico",
-      "pop_34kt_gdacs": -1.0,
+      "pop_34kt_gdacs": null,
       "pop_64kt_gdacs": null,
       "season": 2025.0,
       "name": "ALVIN",
@@ -14905,7 +14905,7 @@
       "from_date": "2025-09-11T21:00:00",
       "iso3": "MEX",
       "country_name": "Mexico",
-      "pop_34kt_gdacs": -1.0,
+      "pop_34kt_gdacs": null,
       "pop_64kt_gdacs": null,
       "season": 2025.0,
       "name": "MARIO",
@@ -15789,7 +15789,7 @@
       "from_date": "2025-10-21T15:00:00",
       "iso3": "GRL",
       "country_name": "Greenland",
-      "pop_34kt_gdacs": -1.0,
+      "pop_34kt_gdacs": null,
       "pop_64kt_gdacs": null,
       "season": 2025.0,
       "name": "MELISSA",

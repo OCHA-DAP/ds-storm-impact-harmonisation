@@ -111,7 +111,13 @@ def main():
     print(f"CHD rows:   {len(df_chd)},  columns: {list(df_chd.columns)}")
 
     # -----------------------------------------------------------------------
-    # 2. Make ADAM exposure values cumulative
+    # 2. Replace -1 sentinel values in GDACS data with null
+    # -----------------------------------------------------------------------
+    df_gdacs = df_gdacs.replace(-1, pd.NA)
+    print("Replaced -1 values in GDACS data with null.")
+
+    # -----------------------------------------------------------------------
+    # 3. Make ADAM exposure values cumulative
     # -----------------------------------------------------------------------
     df_adam = make_adam_cumulative(df_adam)
     print("Applied cumulative fix to ADAM exposure columns.")
