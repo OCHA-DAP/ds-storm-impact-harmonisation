@@ -1,0 +1,7 @@
+.env
+.claude/
+book/_output/
+book/_freeze/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/

@@ -1,0 +1,30 @@
+[project]
+name = "ds-storm-impact-harmonisation"
+version = "0.1.0"
+description = "Harmonising storm impact data"
+readme = "README.md"
+requires-python = ">=3.12.4"
+dependencies = [
+    "great-tables>=0.21.0",
+    "matplotlib>=3.10.8",
+    "ocha-stratus>=0.1.7",
+    "pandas>=3.0.1",
+    "plotnine>=0.15.3",
+    "python-dotenv>=1.2.2",
+    "scipy>=1.17.1",
+]
+
+[dependency-groups]
+dev = [
+    "jupyter>=1.1.1",
+    "ruff>=0.15.5",
+]
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["ds_storm_impact_harmonisation"]
