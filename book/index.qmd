@@ -8,8 +8,9 @@ title: "Introduction"
 CERF rapid-response allocations for tropical cyclones show a statistically
 significant but modest relationship with national population exposure to
 high winds. The strongest signal comes from hurricane-force winds
-(64+ kt), but exposure alone explains only a fraction of allocation
-variation. Political context, concurrent crises, operational capacity,
+(64+ kt), and the relationship strengthens markedly when restricted to
+allocations from 2016 onward (Spearman rho = 0.70). However, exposure alone
+explains only a fraction of allocation variation. Political context, concurrent crises, operational capacity,
 and funding availability all play major roles in allocation decisions.
 These findings suggest cyclone exposure has value as one input among
 several for predicting humanitarian funding needs, rather than as a
@@ -27,10 +28,14 @@ pairs for analysis. On the log scale, population exposed to hurricane-force
 winds (≥ 64 kt) shows the strongest association with allocation size
 (Spearman rho = 0.47, p = 0.002; Pearson r^2^ = 0.15 on log-transformed
 values). Tropical-storm-force exposure (≥ 34 kt) is also significant
-(rho = 0.32, p = 0.01) but explains less variance. Overall, exposure
-is a statistically significant but modest predictor of allocation amounts ---
-considerable scatter remains, reflecting the role of non-exposure factors
-in allocation decisions.
+(rho = 0.32, p = 0.01) but explains less variance. Restricting to
+allocations from 2016 onward --- aligning with the period used in the
+CERF 3RM regression model (Rost, 2025) --- substantially strengthens
+the signal (rho = 0.70 at 64 kt; r^2^ = 0.43 on log scale after outlier
+removal). Overall, exposure is a statistically significant predictor
+of allocation amounts, modest over the full time series but notably
+stronger in the modern period. Considerable scatter remains, reflecting
+the role of non-exposure factors in allocation decisions.
 
 **Technical note:** Both allocation amounts and exposure values are heavily
 right-skewed. Log transformation yields approximately normal distributions

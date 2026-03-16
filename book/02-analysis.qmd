@@ -239,6 +239,7 @@ addition to the distribution-free **Spearman rank correlation**.
 #| output: false
 merged_orig = merged_agg[merged_agg["sid_source"] == "original"].copy()
 merged_all = merged_agg.copy()
+merged_2016 = merged_agg[merged_agg["allocation_year"] >= 2016].copy()
 
 exp_meta = [
     ("pop_exp_34kt", "≥ 34 kt"),
@@ -354,8 +355,8 @@ for col, label in exp_meta:
             "n": len(subset),
             "r² (log)": f"{r_log**2:.3f}",
             "p (Pearson)": f"{p_log:.4f}",
-            "Spearman ρ": f"{rho:.3f}",
-            "p (Spearman)": f"{p_rho:.4f}",
+            "Spearman rho": f"{rho:.3f}",
+            "p (Spear.)": f"{p_rho:.4f}",
         })
 corr_orig_df = pd.DataFrame(corr_rows_orig)
 
@@ -366,7 +367,7 @@ gt_orig = (
         subtitle="r² (log) matches scatter plot annotations; both full and cleaned data shown",
     )
     .tab_spanner(label="Pearson (log₁₀)", columns=["r² (log)", "p (Pearson)"])
-    .tab_spanner(label="Rank-based", columns=["Spearman ρ", "p (Spearman)"])
+    .tab_spanner(label="Spearman (rank)", columns=["Spearman rho", "p (Spear.)"])
 )
 
 clean_idx = corr_orig_df.index[
@@ -453,8 +454,8 @@ for col, label in exp_meta:
             "n": len(subset),
             "r² (log)": f"{r_log**2:.3f}",
             "p (Pearson)": f"{p_log:.4f}",
-            "Spearman ρ": f"{rho:.3f}",
-            "p (Spearman)": f"{p_rho:.4f}",
+            "Spearman rho": f"{rho:.3f}",
+            "p (Spear.)": f"{p_rho:.4f}",
         })
 corr_all_df = pd.DataFrame(corr_rows_all)
 
@@ -465,7 +466,7 @@ gt_all = (
         subtitle="r² (log) matches scatter plot annotations; both full and cleaned data shown",
     )
     .tab_spanner(label="Pearson (log₁₀)", columns=["r² (log)", "p (Pearson)"])
-    .tab_spanner(label="Rank-based", columns=["Spearman ρ", "p (Spearman)"])
+    .tab_spanner(label="Spearman (rank)", columns=["Spearman rho", "p (Spear.)"])
 )
 
 clean_idx = corr_all_df.index[
@@ -483,7 +484,316 @@ gt_all.tab_source_note(
 )
 ```
 
+## 2016+ (3RM Period)
+
+Rost (2025) uses CERF allocations from 2016 onward for the 3RM model.
+Filtering to this period substantially strengthens the exposure--allocation
+relationship, likely reflecting both the evolution of CERF's allocation
+process and improved exposure data quality for recent storms.
+
+```{python}
+#| label: scatter-2016
+#| fig-cap: "2016+ allocations only: log-log scatter coloured by sid source. Correlations are markedly stronger than the full time series."
+plot_df = build_scatter_df(merged_2016)
+annot_df = build_annot_df(merged_2016)
+outlier_df = plot_df[plot_df["is_outlier"]]
+
+source_colors = {"original": "#4292c6", "manual": "#fd8d3c", "auto": "#74c476"}
+
+p = (
+    ggplot(plot_df, aes("pop_exposed", "total_usd"))
+    + geom_point(aes(color="sid_source"), size=3, alpha=0.7)
+    + (
+        geom_point(
+            data=outlier_df,
+            color="red", size=5, stroke=1.5, shape="o", fill="none",
+        )
+        if len(outlier_df) > 0
+        else geom_blank()
+    )
+    + geom_smooth(method="lm", se=True, color="red", fill="red", alpha=0.15)
+    + geom_label(
+        data=annot_df, mapping=aes(label="label"),
+        color="black",
+        ha="left", va="top", size=8, fill="white", alpha=0.8,
+    )
+    + scale_color_manual(values=source_colors)
+    + scale_x_log10()
+    + scale_y_log10()
+    + facet_wrap("~threshold", scales="free")
+    + labs(
+        x="Population Exposed",
+        y="CERF Allocation (USD)",
+        color="Source",
+        title="2016+ Allocations — Log Scale with OLS",
+    )
+    + theme_minimal()
+    + theme(figure_size=(16, 5))
+)
+p
+```
+
+```{python}
+#| label: corr-2016
+corr_rows_2016 = []
+for col, label in exp_meta:
+    full = merged_2016.dropna(subset=[col])
+    full = full[(full[col] > 0) & (full["total_usd"] > 0)]
+
+    clean, _ = remove_col_outliers_iqr(merged_2016, col)
+
+    for dset_label, subset in [("All data", full), ("Outliers removed", clean)]:
+        if len(subset) < 3:
+            continue
+        r_log, p_log = sp_stats.pearsonr(
+            np.log10(subset[col]), np.log10(subset["total_usd"])
+        )
+        rho, p_rho = sp_stats.spearmanr(subset[col], subset["total_usd"])
+        corr_rows_2016.append({
+            "Threshold": label,
+            "Dataset": dset_label,
+            "n": len(subset),
+            "r² (log)": f"{r_log**2:.3f}",
+            "p (Pearson)": f"{p_log:.4f}",
+            "Spearman rho": f"{rho:.3f}",
+            "p (Spear.)": f"{p_rho:.4f}",
+        })
+corr_2016_df = pd.DataFrame(corr_rows_2016)
+
+gt_2016 = (
+    GT(corr_2016_df)
+    .tab_header(
+        title="Correlation — 2016+ (3RM Period)",
+        subtitle="Restricted to allocations from 2016 onward, aligned with Rost (2025)",
+    )
+    .tab_spanner(label="Pearson (log₁₀)", columns=["r² (log)", "p (Pearson)"])
+    .tab_spanner(label="Spearman (rank)", columns=["Spearman rho", "p (Spear.)"])
+)
+
+clean_idx = corr_2016_df.index[
+    corr_2016_df["Dataset"] == "Outliers removed"
+].tolist()
+if clean_idx:
+    gt_2016 = gt_2016.tab_style(
+        style=style.fill(color="#f0f7f0"),
+        locations=loc.body(rows=clean_idx),
+    )
+
+gt_2016.tab_source_note(
+    "r² = Pearson r squared on log₁₀ values (same statistic shown in scatter plots). "
+    "Green rows = per-column IQR outliers removed."
+)
+```
+
 :::
+
+## Adding CIRV as a Covariate
+
+The CERF Index for Risk and Vulnerability (CIRV) is a composite country-level
+score used in the Rost (2025) [3RM model](https://zenodo.org/records/15164535).
+Since CIRV captures structural vulnerability factors (risk severity,
+institutional capacity, etc.), it may explain some of the country-level
+variation that exposure alone cannot. We join CIRV scores from the 3RM
+dataset and test whether combining exposure with CIRV improves the model.
+This analysis is restricted to the 2016+ period where CIRV data is available.
+
+```{python}
+#| label: cirv-setup
+#| output: false
+import statsmodels.api as sm
+
+df_3rm = pd.read_excel(
+    "/Users/zackarno/Downloads/CERF_3RM_Dataset.xlsx", sheet_name="Data"
+)
+df_3rm = df_3rm.dropna(subset=["Application Code"])
+storms_3rm = df_3rm[df_3rm["Storm"] == 1]
+cirv_lookup = storms_3rm[["ISO", "Year", "CIRV"]].drop_duplicates()
+
+merged_cirv = merged_agg.merge(
+    cirv_lookup.rename(columns={"ISO": "iso3", "Year": "allocation_year"}),
+    on=["iso3", "allocation_year"],
+    how="left",
+)
+
+# Filter to rows with CIRV available and positive allocation
+merged_cirv_pos = merged_cirv[merged_cirv["total_usd"] > 0].copy()
+
+# Build per-threshold regression datasets (all data and outlier-removed)
+reg_data = {}
+for col, label in exp_meta:
+    sub = merged_cirv_pos.dropna(subset=[col, "CIRV"])
+    sub = sub[sub[col] > 0].copy()
+    sub["log_exp"] = np.log10(sub[col])
+    sub["log_usd"] = np.log10(sub["total_usd"])
+    sub["log_cirv"] = np.log10(sub["CIRV"])
+    clean, outliers = remove_col_outliers_iqr(sub, col)
+    clean["log_exp"] = np.log10(clean[col])
+    clean["log_usd"] = np.log10(clean["total_usd"])
+    clean["log_cirv"] = np.log10(clean["CIRV"])
+    reg_data[label] = {"all": sub, "clean": clean, "outliers": outliers, "col": col}
+```
+
+```{python}
+#| label: cirv-scatter
+#| fig-cap: "CERF allocation vs population exposure at each wind speed threshold, coloured by CIRV score. Red circles mark IQR outliers on log exposure."
+scatter_frames = []
+outlier_frames = []
+for label, rd in reg_data.items():
+    frame = rd["all"][["Country", "total_usd", "CIRV"]].copy()
+    frame["threshold"] = label
+    frame["pop_exposed"] = rd["all"][rd["col"]]
+    scatter_frames.append(frame)
+    if len(rd["outliers"]) > 0:
+        oframe = rd["outliers"][["Country", "total_usd", "CIRV"]].copy()
+        oframe["threshold"] = label
+        oframe["pop_exposed"] = rd["outliers"][rd["col"]]
+        outlier_frames.append(oframe)
+
+scatter_df = pd.concat(scatter_frames, ignore_index=True)
+scatter_df["threshold"] = pd.Categorical(
+    scatter_df["threshold"], categories=[l for _, l in exp_meta], ordered=True
+)
+outlier_df_cirv = pd.concat(outlier_frames, ignore_index=True) if outlier_frames else pd.DataFrame()
+if len(outlier_df_cirv) > 0:
+    outlier_df_cirv["threshold"] = pd.Categorical(
+        outlier_df_cirv["threshold"], categories=[l for _, l in exp_meta], ordered=True
+    )
+
+(
+    ggplot(scatter_df, aes("pop_exposed", "total_usd", color="CIRV"))
+    + geom_point(size=3, alpha=0.8)
+    + (
+        geom_point(
+            data=outlier_df_cirv,
+            color="red", size=5, stroke=1.5, shape="o", fill="none",
+        )
+        if len(outlier_df_cirv) > 0
+        else geom_blank()
+    )
+    + geom_smooth(method="lm", se=True, color="red", fill="red", alpha=0.15)
+    + scale_x_log10()
+    + scale_y_log10()
+    + scale_color_gradient(low="#fee8c8", high="#b30000", name="CIRV")
+    + facet_wrap("~threshold", scales="free")
+    + labs(
+        x="Population Exposed",
+        y="CERF Allocation (USD)",
+        title="Exposure vs Allocation — Coloured by CIRV (2016+)",
+    )
+    + theme_minimal()
+    + theme(figure_size=(16, 5))
+)
+```
+
+```{python}
+#| label: cirv-regression-table
+model_rows = []
+
+for label, rd in reg_data.items():
+    df_all = rd["all"]
+    df_clean = rd["clean"]
+
+    # Exposure only
+    X1 = sm.add_constant(df_all[["log_exp"]])
+    m1 = sm.OLS(df_all["log_usd"], X1).fit()
+    model_rows.append({
+        "Threshold": label,
+        "Model": "Exposure only",
+        "n": int(m1.nobs),
+        "R²": f"{m1.rsquared:.3f}",
+        "Adj R²": f"{m1.rsquared_adj:.3f}",
+        "p (exposure)": f"{m1.pvalues['log_exp']:.4f}",
+        "p (CIRV)": "—",
+    })
+
+    # CIRV only
+    X2 = sm.add_constant(df_all[["log_cirv"]])
+    m2 = sm.OLS(df_all["log_usd"], X2).fit()
+    model_rows.append({
+        "Threshold": label,
+        "Model": "CIRV only",
+        "n": int(m2.nobs),
+        "R²": f"{m2.rsquared:.3f}",
+        "Adj R²": f"{m2.rsquared_adj:.3f}",
+        "p (exposure)": "—",
+        "p (CIRV)": f"{m2.pvalues['log_cirv']:.4f}",
+    })
+
+    # Exposure + CIRV
+    X3 = sm.add_constant(df_all[["log_exp", "log_cirv"]])
+    m3 = sm.OLS(df_all["log_usd"], X3).fit()
+    model_rows.append({
+        "Threshold": label,
+        "Model": "Exposure + CIRV",
+        "n": int(m3.nobs),
+        "R²": f"{m3.rsquared:.3f}",
+        "Adj R²": f"{m3.rsquared_adj:.3f}",
+        "p (exposure)": f"{m3.pvalues['log_exp']:.4f}",
+        "p (CIRV)": f"{m3.pvalues['log_cirv']:.4f}",
+    })
+
+    # Exposure only (outliers removed)
+    if len(df_clean) >= 5:
+        X4a = sm.add_constant(df_clean[["log_exp"]])
+        m4a = sm.OLS(df_clean["log_usd"], X4a).fit()
+        model_rows.append({
+            "Threshold": label,
+            "Model": "Exposure only (outliers removed)",
+            "n": int(m4a.nobs),
+            "R²": f"{m4a.rsquared:.3f}",
+            "Adj R²": f"{m4a.rsquared_adj:.3f}",
+            "p (exposure)": f"{m4a.pvalues['log_exp']:.4f}",
+            "p (CIRV)": "—",
+        })
+
+    # Exposure + CIRV (outliers removed)
+    if len(df_clean) >= 5:
+        X4 = sm.add_constant(df_clean[["log_exp", "log_cirv"]])
+        m4 = sm.OLS(df_clean["log_usd"], X4).fit()
+        model_rows.append({
+            "Threshold": label,
+            "Model": "Exposure + CIRV (outliers removed)",
+            "n": int(m4.nobs),
+            "R²": f"{m4.rsquared:.3f}",
+            "Adj R²": f"{m4.rsquared_adj:.3f}",
+            "p (exposure)": f"{m4.pvalues['log_exp']:.4f}",
+            "p (CIRV)": f"{m4.pvalues['log_cirv']:.4f}",
+        })
+
+model_df = pd.DataFrame(model_rows)
+
+combined_idx = model_df.index[model_df["Model"] == "Exposure + CIRV"].tolist()
+clean_idx = model_df.index[model_df["Model"].str.contains("outliers removed")].tolist()
+
+(
+    GT(model_df)
+    .tab_header(
+        title="OLS Regression Comparison (2016+)",
+        subtitle="Dependent variable: log₁₀(CERF allocation USD)",
+    )
+    .tab_spanner(label="Fit", columns=["R²", "Adj R²"])
+    .tab_spanner(label="Significance", columns=["p (exposure)", "p (CIRV)"])
+    .tab_style(
+        style=style.fill(color="#e6eeff"),
+        locations=loc.body(rows=combined_idx),
+    )
+    .tab_style(
+        style=style.fill(color="#f0f7f0"),
+        locations=loc.body(rows=clean_idx),
+    )
+    .tab_source_note(
+        "All variables log₁₀-transformed. CIRV from Rost (2025) 3RM dataset. "
+        "Blue rows = combined model. Green rows = combined with IQR outliers removed."
+    )
+)
+```
+
+Exposure and CIRV have nearly identical individual explanatory power
+(R² ~0.24 vs ~0.23). Combined, adjusted R² improves modestly to ~0.27,
+though both variables lose individual significance — suggesting partial
+correlation between country vulnerability and storm exposure.
+This supports integrating exposure into the existing 3RM framework
+rather than using it as a standalone predictor.
 
 ## Key Findings
 
@@ -507,6 +817,12 @@ gt_all.tab_source_note(
 5. **Strongest signal at 64 kt**: Population exposed to ≥ 64 kt winds shows
    the strongest correlation with CERF allocation amounts.
 
-6. **High variance**: Substantial scatter — allocation amounts depend on many
+6. **Much stronger signal from 2016 onward**: Restricting to the 3RM period
+   (2016+) roughly doubles the explained variance across all thresholds
+   (e.g. Spearman rho = 0.70 at 64 kt vs 0.47 over all years). This
+   likely reflects the evolution of CERF's allocation process and improved
+   data quality for recent storms.
+
+7. **High variance**: Substantial scatter — allocation amounts depend on many
    factors beyond wind exposure (political context, absorptive capacity,
    concurrent crises, flooding vs wind damage).

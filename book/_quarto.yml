@@ -8,7 +8,7 @@ project:
 book:
   title: "Storm Impact Harmonisation"
   subtitle: "Linking CERF allocations with cyclone population exposure"
-  author: "**OCHA Data Science Unit:** Arno Z., Downing T., Ker T., Ndirangu P., Martini G., Milano L."
+  author: "**OCHA Data Science Unit:** Arno Z., Downing T., Ker H., Ndirangu P., Martini G., Milano L."
   sidebar:
     logo: logo_white.png
   chapters:
