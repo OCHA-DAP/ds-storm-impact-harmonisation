@@ -1,14 +1,16 @@
 """
-GDACS — Historical National Exposure
+GDACS — Historical ADM0 Exposure
 
-Retrieves country-level population exposure for all tropical cyclones within a
+Retrieves ADM0-level population exposure for all tropical cyclones within a
 date range, using the GDACS search endpoint for full historical coverage. Saves
-national level exposure estimates to blob storage for all available storms.
+ADM0 and ADM1 level exposure estimates to blob storage for all available storms.
 
 API path:
     geteventlist/search  (paginated, filterable by date / source)
       -> getepisodedata  (latest episode per event)
         -> getimpact -> datums[alias='country'] -> ISO_3DIGIT, CNTRY_NAME, POP_AFFECTED
+                     -> datums[alias='alert']   -> FIPS_ADMIN, GMI_ADMIN, ADMIN_NAME,
+                                                   POP_AFFECTED
 """
 
 import sys
@@ -28,7 +30,8 @@ GDACS_BASE = "https://www.gdacs.org/gdacsapi/api"
 FROM_DATE = "2010-01-01"
 TO_DATE = "2026-12-31"
 SOURCE = "NOAA"  # 'NOAA' = Atlantic/E.Pacific | 'JTWC' = W.Pacific/Indian Ocean
-OUTPUT_CSV = f"{PROJECT_PREFIX}/processed/gdacs_historical_national_exposure.csv"
+OUTPUT_ADM0_CSV = f"{PROJECT_PREFIX}/processed/gdacs_historical_adm0_exposure.csv"
+OUTPUT_ADM1_CSV = f"{PROJECT_PREFIX}/processed/gdacs_historical_adm1_exposure.csv"
 
 # Wind speed (kt) implied by each buffer key
 BUFFER_KT = {
@@ -101,8 +104,8 @@ def fetch_all_events():
 # ---------------------------------------------------------------------------
 
 
-def fetch_national_exposure(event_id):
-    """Return country-row dicts for the latest episode. Empty list if no data."""
+def fetch_adm0_exposure(event_id):
+    """Return ADM0 and ADM1 row dicts for the latest episode. Empty lists if no data."""
     try:
         props = requests.get(
             f"{GDACS_BASE}/events/getepisodedata",
@@ -111,7 +114,7 @@ def fetch_national_exposure(event_id):
         ).json()["properties"]
     except Exception as e:
         print(f"  [{event_id}] failed: {e}")
-        return []
+        return [], []
 
     last_ep_url = props.get("episodes", [{}])[-1].get("details", "")
     episode_id = (
@@ -123,75 +126,134 @@ def fetch_national_exposure(event_id):
         if k.startswith("buffer")
     }
 
-    country_data = {}
+    adm0_data = {}
+    adm1_data = {}
     for buf, url in buffers.items():
         col = f"pop_{BUFFER_KT.get(buf, buf)}kt"
         try:
             datums = requests.get(url, timeout=30).json().get("datums", [])
         except Exception:
             continue
-        country_datum = next((d for d in datums if d["alias"] == "country"), None)
-        if not country_datum:
-            continue
-        for row in country_datum.get("datum", []):
-            sc = {s["name"]: s["value"] for s in row["scalars"]["scalar"]}
-            iso3 = sc.get("ISO_3DIGIT")
-            if not iso3:
-                continue
-            pop_affected = sc.get("POP_AFFECTED")
-            if pop_affected is not None and pop_affected != "":
-                try:
-                    pop_value = int(float(pop_affected))
-                except (ValueError, TypeError):
+
+        adm0_datum = next((d for d in datums if d["alias"] == "country"), None)
+        if adm0_datum:
+            for row in adm0_datum.get("datum", []):
+                sc = {s["name"]: s["value"] for s in row["scalars"]["scalar"]}
+                iso3 = sc.get("ISO_3DIGIT")
+                if not iso3:
+                    continue
+                pop_affected = sc.get("POP_AFFECTED")
+                if pop_affected is not None and pop_affected != "":
+                    try:
+                        pop_value = int(float(pop_affected))
+                    except (ValueError, TypeError):
+                        pop_value = None
+                else:
                     pop_value = None
-            else:
-                pop_value = None
+                adm0_data.setdefault(
+                    iso3,
+                    {
+                        "event_id": event_id,
+                        "episode_id": episode_id,
+                        "iso3": iso3,
+                        "country_name": sc.get("CNTRY_NAME"),
+                    },
+                )[col] = pop_value
 
-            country_data.setdefault(
-                iso3,
-                {
-                    "event_id": event_id,
-                    "episode_id": episode_id,
-                    "iso3": iso3,
-                    "country_name": sc.get("CNTRY_NAME"),
-                },
-            )[col] = pop_value
+        alert_datum = next((d for d in datums if d["alias"] == "alert"), None)
+        if alert_datum:
+            for row in alert_datum.get("datum", []):
+                sc = {s["name"]: s["value"] for s in row["scalars"]["scalar"]}
+                fips_admin = sc.get("FIPS_ADMIN")
+                if not fips_admin:
+                    continue
+                gmi_admin = sc.get("GMI_ADMIN", "")
+                iso3 = gmi_admin.split("-")[0] if gmi_admin else None
+                pop_affected = sc.get("POP_AFFECTED")
+                if pop_affected is not None and pop_affected != "":
+                    try:
+                        pop_value = int(float(pop_affected))
+                    except (ValueError, TypeError):
+                        pop_value = None
+                else:
+                    pop_value = None
+                adm1_data.setdefault(
+                    fips_admin,
+                    {
+                        "event_id": event_id,
+                        "episode_id": episode_id,
+                        "iso3": iso3,
+                        "fips_admin": fips_admin,
+                        "gmi_admin": gmi_admin,
+                        "adm1_name": sc.get("ADMIN_NAME"),
+                        "adm1_type": sc.get("TYPE_ENG"),
+                    },
+                )[col] = pop_value
 
-    return list(country_data.values())
+    return list(adm0_data.values()), list(adm1_data.values())
 
 
 def build_exposure_df(df_events):
-    all_rows = []
+    all_adm0 = []
+    all_adm1 = []
     for _, ev in df_events.iterrows():
         eid = ev["event_id"]
         name = ev["storm_name"]
         print(f"Fetching {name} ({eid}) …", end=" ")
-        rows = fetch_national_exposure(eid)
-        for r in rows:
-            r["storm_name"] = name
-            r["source"] = ev["source"]
-            r["from_date"] = ev["from_date"]
-            r["alert_level"] = ev["alert_level"]
-        all_rows.extend(rows)
-        print(f"{len(rows)} countries")
+        adm0_rows, adm1_rows = fetch_adm0_exposure(eid)
+        meta = {
+            "storm_name": name,
+            "source": ev["source"],
+            "from_date": ev["from_date"],
+            "alert_level": ev["alert_level"],
+        }
+        for r in adm0_rows:
+            r.update(meta)
+        for r in adm1_rows:
+            r.update(meta)
+        all_adm0.extend(adm0_rows)
+        all_adm1.extend(adm1_rows)
+        print(f"{len(adm0_rows)} adm0 regions, {len(adm1_rows)} adm1 regions")
 
-    df = (
-        pd.DataFrame(all_rows)
-        .sort_values(["from_date", "storm_name"], ascending=False)
-        .reset_index(drop=True)
+    def _to_df(rows, leading):
+        df = (
+            pd.DataFrame(rows)
+            .sort_values(["from_date", "storm_name"], ascending=False)
+            .reset_index(drop=True)
+        )
+        pop_cols = sorted([c for c in df.columns if c.startswith("pop_")])
+        return df[leading + pop_cols]
+
+    df_adm0 = _to_df(
+        all_adm0,
+        [
+            "storm_name",
+            "event_id",
+            "episode_id",
+            "source",
+            "from_date",
+            "alert_level",
+            "iso3",
+            "country_name",
+        ],
     )
-    leading = [
-        "storm_name",
-        "event_id",
-        "episode_id",
-        "source",
-        "from_date",
-        "alert_level",
-        "iso3",
-        "country_name",
-    ]
-    pop_cols = sorted([c for c in df.columns if c.startswith("pop_")])
-    return df[leading + pop_cols]
+    df_adm1 = _to_df(
+        all_adm1,
+        [
+            "storm_name",
+            "event_id",
+            "episode_id",
+            "source",
+            "from_date",
+            "alert_level",
+            "iso3",
+            "fips_admin",
+            "gmi_admin",
+            "adm1_name",
+            "adm1_type",
+        ],
+    )
+    return df_adm0, df_adm1
 
 
 # ---------------------------------------------------------------------------
@@ -206,19 +268,16 @@ def parse_name(input_name):
     return season, storm_name
 
 
-def join_ibtracs(df):
-    engine = stratus.get_engine("prod")
-    with engine.connect() as conn:
-        df_ibtracs = pd.read_sql("SELECT * FROM storms.ibtracs_storms", conn)
-
+def join_ibtracs(df, df_ibtracs, geo_cols):
     df_cleaned = df.copy()
     df_cleaned[["season", "name"]] = df_cleaned["storm_name"].apply(
         lambda x: pd.Series(parse_name(x))
     )
 
+    drop = list(geo_cols) + [c for c in df_cleaned.columns if c.startswith("pop_")]
     df_storms = (
         df_cleaned.drop_duplicates(subset=["storm_name"])
-        .drop(columns=["iso3", "country_name", "pop_34kt", "pop_64kt"])
+        .drop(columns=drop)
         .reset_index()
     )
     print(f"Dataset has {len(df_storms)} unique storms.")
@@ -243,15 +302,30 @@ def join_ibtracs(df):
 def main():
     print("=== Fetching all TC events ===")
     df_events = fetch_all_events()
+    # TODO: Temp for testing!!
+    df_events = df_events.head(10)
 
     print("\n=== Fetching population exposure per event ===")
-    df = build_exposure_df(df_events)
+    df_adm0, df_adm1 = build_exposure_df(df_events)
 
     print("\n=== Joining with IBTrACS ===")
-    df_final = join_ibtracs(df)
+    engine = stratus.get_engine("prod")
+    with engine.connect() as conn:
+        df_ibtracs = pd.read_sql("SELECT * FROM storms.ibtracs_storms", conn)
 
-    print(f"\n=== Saving {len(df_final)} rows to {OUTPUT_CSV} ===")
-    stratus.upload_csv_to_blob(df_final, OUTPUT_CSV)
+    df_adm0_final = join_ibtracs(df_adm0, df_ibtracs, geo_cols=["iso3", "country_name"])
+    df_adm1_final = join_ibtracs(
+        df_adm1,
+        df_ibtracs,
+        geo_cols=["iso3", "fips_admin", "gmi_admin", "adm1_name", "adm1_type"],
+    )
+
+    print(f"\n=== Saving {len(df_adm0_final)} rows to {OUTPUT_ADM0_CSV} ===")
+    stratus.upload_csv_to_blob(df_adm0_final, OUTPUT_ADM0_CSV)
+
+    print(f"\n=== Saving {len(df_adm1_final)} rows to {OUTPUT_ADM1_CSV} ===")
+    stratus.upload_csv_to_blob(df_adm1_final, OUTPUT_ADM1_CSV)
+
     print("Done.")
 
 

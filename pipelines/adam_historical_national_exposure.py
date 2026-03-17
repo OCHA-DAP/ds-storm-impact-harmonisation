@@ -1,9 +1,9 @@
 """
-WFP ADAM — Historical National Exposure
+WFP ADAM — Historical ADM0 Exposure
 
-Retrieves country-level population exposure for all tropical storms, using the
+Retrieves ADM0-level population exposure for all tropical storms, using the
 WFP ADAM OGC API Features endpoint for full historical coverage. For each storm,
-retrieves only the latest available episode. Saves national level exposure
+retrieves only the latest available episode. Saves ADM0 and ADM1 level exposure
 estimates to blob storage.
 
 API path:
@@ -36,7 +36,8 @@ load_dotenv()
 ADAM_BASE = "https://api.adam.geospatial.wfp.org/api"
 COLLECTION = "adam.adam_ts_events"
 PAGE_SIZE = 100
-OUTPUT_CSV = f"{PROJECT_PREFIX}/processed/adam_historical_national_exposure.csv"
+OUTPUT_ADM0_CSV = f"{PROJECT_PREFIX}/processed/adam_historical_adm0_exposure.csv"
+OUTPUT_ADM1_CSV = f"{PROJECT_PREFIX}/processed/adam_historical_adm1_exposure.csv"
 SOURCE = "NOAA"
 
 
@@ -130,10 +131,10 @@ def name_to_iso3(country_name):
     return code
 
 
-def fetch_national_exposure(row):
+def fetch_adm0_exposure(row):
     csv_url = row["population_csv_url"]
     if not csv_url:
-        return []
+        return [], []
 
     try:
         resp = requests.get(csv_url, timeout=30)
@@ -141,70 +142,118 @@ def fetch_national_exposure(row):
         df_csv = pd.read_csv(pd.io.common.StringIO(resp.text))
     except Exception as e:
         print(f"  [{row['event_id']}] CSV fetch failed: {e}")
-        return []
+        return [], []
 
     df_csv.columns = df_csv.columns.str.strip().str.upper()
 
     pop_cols = ["POP_60_KMH", "POP_90_KMH", "POP_120_KMH"]
+    kt_names = {
+        "POP_60_KMH": "pop_34kt",
+        "POP_90_KMH": "pop_50kt",
+        "POP_120_KMH": "pop_64kt",
+    }
     present = [c for c in pop_cols if c in df_csv.columns]
     if "ADM0_NAME" not in df_csv.columns or not present:
-        return []
+        return [], []
 
-    agg = df_csv.groupby("ADM0_NAME", dropna=False)[present].sum().reset_index()
+    meta = {
+        "event_id": row["event_id"],
+        "episode_id": row["episode_id"],
+        "storm_name": row["storm_name"],
+        "source": row["source"],
+        "from_date": row["from_date"],
+        "alert_level": row["alert_level"],
+    }
 
-    out = []
-    for _, r in agg.iterrows():
+    # ADM0
+    adm0_out = []
+    for _, r in (
+        df_csv.groupby("ADM0_NAME", dropna=False)[present]
+        .sum()
+        .reset_index()
+        .iterrows()
+    ):
         adm0 = r["ADM0_NAME"]
-        rec = {
-            "event_id": row["event_id"],
-            "episode_id": row["episode_id"],
-            "storm_name": row["storm_name"],
-            "source": row["source"],
-            "from_date": row["from_date"],
-            "alert_level": row["alert_level"],
-            "iso3": name_to_iso3(str(adm0)),
-            "country_name": adm0,
-        }
-        # Standardise to kt column names
-        kt_names = {
-            "POP_60_KMH": "pop_34kt",
-            "POP_90_KMH": "pop_50kt",
-            "POP_120_KMH": "pop_64kt",
-        }
+        rec = {**meta, "iso3": name_to_iso3(str(adm0)), "country_name": adm0}
         for col in pop_cols:
             rec[kt_names[col]] = int(r[col]) if col in r and pd.notna(r[col]) else None
-        out.append(rec)
-    return out
+        adm0_out.append(rec)
+
+    # ADM1
+    adm1_out = []
+    if "ADM1_NAME" in df_csv.columns:
+        for _, r in (
+            df_csv.groupby(["ADM0_NAME", "ADM1_NAME"], dropna=False)[present]
+            .sum()
+            .reset_index()
+            .iterrows()
+        ):
+            adm0 = r["ADM0_NAME"]
+            rec = {
+                **meta,
+                "iso3": name_to_iso3(str(adm0)),
+                "country_name": adm0,
+                "adm1_name": r["ADM1_NAME"],
+            }
+            for col in pop_cols:
+                rec[kt_names[col]] = (
+                    int(r[col]) if col in r and pd.notna(r[col]) else None
+                )
+            adm1_out.append(rec)
+
+    return adm0_out, adm1_out
 
 
 def build_exposure_df(df_latest):
-    all_rows = []
+    all_adm0 = []
+    all_adm1 = []
     for _, ev in df_latest.iterrows():
         print(
             f"Fetching {ev['storm_name']} ({ev['event_id']}, ep {ev['episode_id']}) …",
             end=" ",
         )
-        rows = fetch_national_exposure(ev)
-        all_rows.extend(rows)
-        print(f"{len(rows)} countries")
+        adm0_rows, adm1_rows = fetch_adm0_exposure(ev)
+        all_adm0.extend(adm0_rows)
+        all_adm1.extend(adm1_rows)
+        print(f"{len(adm0_rows)} adm0 regions, {len(adm1_rows)} adm1 regions")
 
-    df = (
-        pd.DataFrame(all_rows)
-        .sort_values(["from_date", "storm_name"], ascending=False)
-        .reset_index(drop=True)
+    def _to_df(rows, leading):
+        df = (
+            pd.DataFrame(rows)
+            .sort_values(["from_date", "storm_name"], ascending=False)
+            .reset_index(drop=True)
+        )
+        pop_cols = sorted([c for c in df.columns if c.startswith("pop_")])
+        return df[leading + pop_cols]
+
+    df_adm0 = _to_df(
+        all_adm0,
+        [
+            "storm_name",
+            "event_id",
+            "episode_id",
+            "source",
+            "from_date",
+            "alert_level",
+            "iso3",
+            "country_name",
+        ],
     )
-    leading = [
-        "storm_name",
-        "event_id",
-        "episode_id",
-        "source",
-        "from_date",
-        "alert_level",
-        "iso3",
-        "country_name",
-    ]
-    pop_cols = sorted([c for c in df.columns if c.startswith("pop_")])
-    return df[leading + pop_cols]
+    df_adm1 = _to_df(
+        all_adm1,
+        [
+            "storm_name",
+            "event_id",
+            "episode_id",
+            "source",
+            "from_date",
+            "alert_level",
+            "iso3",
+            "country_name",
+            "adm1_name",
+        ],
+    )
+    return df_adm0, df_adm1
 
 
 # ---------------------------------------------------------------------------
@@ -219,21 +268,15 @@ def parse_name(input_name):
     return season, storm_name
 
 
-def join_ibtracs(df):
+def join_ibtracs(df, df_ibtracs, geo_cols):
     df_sel = df.copy()
-
-    engine = stratus.get_engine("prod")
-    with engine.connect() as conn:
-        df_ibtracs = pd.read_sql("SELECT * FROM storms.ibtracs_storms", conn)
-
     df_sel[["season", "name"]] = df_sel["storm_name"].apply(
         lambda x: pd.Series(parse_name(x))
     )
 
+    drop = list(geo_cols) + [c for c in df_sel.columns if c.startswith("pop_")]
     df_storms = (
-        df_sel.drop_duplicates(subset=["storm_name"])
-        .drop(columns=["iso3", "country_name", "pop_34kt", "pop_50kt", "pop_64kt"])
-        .reset_index()
+        df_sel.drop_duplicates(subset=["storm_name"]).drop(columns=drop).reset_index()
     )
     print(f"Dataset has {len(df_storms)} unique storms.")
 
@@ -264,13 +307,24 @@ def main():
     print(f"Unique events (latest episode only): {len(df_latest)}")
 
     print("\n=== Fetching population exposure per event ===")
-    df = build_exposure_df(df_latest)
+    df_adm0, df_adm1 = build_exposure_df(df_latest)
 
     print("\n=== Joining with IBTrACS ===")
-    df_final = join_ibtracs(df)
+    engine = stratus.get_engine("prod")
+    with engine.connect() as conn:
+        df_ibtracs = pd.read_sql("SELECT * FROM storms.ibtracs_storms", conn)
 
-    print(f"\n=== Saving {len(df_final)} rows to {OUTPUT_CSV} ===")
-    stratus.upload_csv_to_blob(df_final, OUTPUT_CSV)
+    df_adm0_final = join_ibtracs(df_adm0, df_ibtracs, geo_cols=["iso3", "country_name"])
+    df_adm1_final = join_ibtracs(
+        df_adm1, df_ibtracs, geo_cols=["iso3", "country_name", "adm1_name"]
+    )
+
+    print(f"\n=== Saving {len(df_adm0_final)} rows to {OUTPUT_ADM0_CSV} ===")
+    stratus.upload_csv_to_blob(df_adm0_final, OUTPUT_ADM0_CSV)
+
+    print(f"\n=== Saving {len(df_adm1_final)} rows to {OUTPUT_ADM1_CSV} ===")
+    stratus.upload_csv_to_blob(df_adm1_final, OUTPUT_ADM1_CSV)
+
     print("Done.")
 
 

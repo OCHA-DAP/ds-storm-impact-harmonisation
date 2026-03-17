@@ -1,14 +1,17 @@
 """
-Join ADAM + GDACS + CHD — Historical National Exposure
+Join ADAM + GDACS + CHD — Historical ADM0 and ADM1 Exposure
 
-Loads national-level population exposure estimates from the ADAM, GDACS, and CHD
+Loads ADM0-level population exposure estimates from the ADAM, GDACS, and CHD
 historical pipelines and joins them into a single dataset where each row is one
-storm x one country. Also exports the combined dataset as JSON.
+storm x one ADM0 region. Also exports the combined ADM0 dataset as JSON.
+Separately joins ADAM and GDACS ADM1-level estimates into a combined ADM1 dataset.
 
 Sources:
-    adam_historical_national_exposure.csv  — WFP ADAM wind exposure at 34/50/64 kt
-    gdacs_historical_national_exposure.csv — GDACS wind exposure at 34 kt / 64 kt
-    adm0_ibtracs_exp_all.parquet           — CHD wind exposure at 34/50/64 kt
+    adam_historical_adm0_exposure.csv  — WFP ADAM wind exposure at 34/50/64 kt
+    gdacs_historical_adm0_exposure.csv — GDACS wind exposure at 34 kt / 64 kt
+    adm0_ibtracs_exp_all.parquet       — CHD wind exposure at 34/50/64 kt
+    adam_historical_adm1_exposure.csv  — WFP ADAM ADM1 wind exposure at 34/50/64 kt
+    gdacs_historical_adm1_exposure.csv — GDACS ADM1 wind exposure at 34 kt / 64 kt
 
 Cleaning applied to ADAM before joining:
     Exposure values must be cumulative (≥ threshold). ADAM stores per-band values,
@@ -35,10 +38,13 @@ from constants import CHD_ZERO_FILL_ISO3, PROJECT_PREFIX
 
 load_dotenv()
 
-ADAM_BLOB = f"{PROJECT_PREFIX}/processed/adam_historical_national_exposure.csv"
-GDACS_BLOB = f"{PROJECT_PREFIX}/processed/gdacs_historical_national_exposure.csv"
+ADAM_ADM0_BLOB = f"{PROJECT_PREFIX}/processed/adam_historical_adm0_exposure.csv"
+GDACS_ADM0_BLOB = f"{PROJECT_PREFIX}/processed/gdacs_historical_adm0_exposure.csv"
 CHD_BLOB = f"{PROJECT_PREFIX}/processed/adm0_ibtracs_exp_all.parquet"
-OUTPUT_CSV = f"{PROJECT_PREFIX}/processed/combined_historical_national_exposure.csv"
+ADAM_ADM1_BLOB = f"{PROJECT_PREFIX}/processed/adam_historical_adm1_exposure.csv"
+GDACS_ADM1_BLOB = f"{PROJECT_PREFIX}/processed/gdacs_historical_adm1_exposure.csv"
+OUTPUT_ADM0_CSV = f"{PROJECT_PREFIX}/processed/combined_historical_adm0_exposure.csv"
+OUTPUT_ADM1_CSV = f"{PROJECT_PREFIX}/processed/combined_historical_adm1_exposure.csv"
 OUTPUT_JSON = Path(__file__).resolve().parents[1] / "assets" / "exposure_data.json"
 
 
@@ -78,6 +84,8 @@ JOIN_COLS = [
     "storm_id",
 ]
 
+JOIN_COLS_ADM1 = JOIN_COLS + ["adm1_name"]
+
 
 def pivot_chd(df: pd.DataFrame) -> pd.DataFrame:
     """Pivot CHD data from long format to wide format with source-labelled columns.
@@ -98,13 +106,47 @@ def pivot_chd(df: pd.DataFrame) -> pd.DataFrame:
     return df_wide
 
 
+def merge_adam_gdacs(df_adam, df_gdacs, join_cols):
+    """Outer-join ADAM and GDACS on join_cols and consolidate duplicate columns."""
+    df_merged = df_gdacs.merge(
+        df_adam,
+        on=join_cols,
+        how="outer",
+        suffixes=("_gdacs", "_adam"),
+    )
+    df_merged["alert_level"] = df_merged["alert_level_gdacs"].fillna(
+        df_merged["alert_level_adam"]
+    )
+    df_merged["storm_name"] = df_merged["storm_name_gdacs"].fillna(
+        df_merged["storm_name_adam"]
+    )
+    df_merged["source"] = df_merged["source_gdacs"].fillna(df_merged["source_adam"])
+
+    drop_cols = [
+        "alert_level_gdacs",
+        "alert_level_adam",
+        "storm_name_gdacs",
+        "storm_name_adam",
+        "source_gdacs",
+        "source_adam",
+    ]
+    drop_cols += [c for c in ("index_gdacs", "index_adam") if c in df_merged.columns]
+    df_merged = df_merged.drop(columns=drop_cols)
+
+    # pop_50kt comes only from ADAM; label it explicitly for consistency
+    if "pop_50kt" in df_merged.columns:
+        df_merged = df_merged.rename(columns={"pop_50kt": "pop_50kt_adam"})
+
+    return df_merged
+
+
 def main():
     # -----------------------------------------------------------------------
     # 1. Load all datasets from blob storage
     # -----------------------------------------------------------------------
     print("Loading datasets from blob storage...")
-    df_adam = stratus.load_csv_from_blob(ADAM_BLOB)
-    df_gdacs = stratus.load_csv_from_blob(GDACS_BLOB)
+    df_adam = stratus.load_csv_from_blob(ADAM_ADM0_BLOB)
+    df_gdacs = stratus.load_csv_from_blob(GDACS_ADM0_BLOB)
     df_chd = stratus.load_parquet_from_blob(CHD_BLOB)
     print(f"ADAM rows:  {len(df_adam)},  columns: {list(df_adam.columns)}")
     print(f"GDACS rows: {len(df_gdacs)}, columns: {list(df_gdacs.columns)}")
@@ -123,43 +165,9 @@ def main():
     print("Applied cumulative fix to ADAM exposure columns.")
 
     # -----------------------------------------------------------------------
-    # 3. Outer join on shared metadata columns
+    # 3. Outer join ADAM + GDACS on shared metadata columns
     # -----------------------------------------------------------------------
-    df_merged = df_gdacs.merge(
-        df_adam,
-        on=JOIN_COLS,
-        how="outer",
-        suffixes=("_gdacs", "_adam"),
-    )
-    print(f"Merged rows: {len(df_merged)}")
-
-    # -----------------------------------------------------------------------
-    # 4. Consolidate duplicate columns (take non-null value from either source)
-    # -----------------------------------------------------------------------
-    df_merged["alert_level"] = df_merged["alert_level_gdacs"].fillna(
-        df_merged["alert_level_adam"]
-    )
-    df_merged["storm_name"] = df_merged["storm_name_gdacs"].fillna(
-        df_merged["storm_name_adam"]
-    )
-    df_merged["source"] = df_merged["source_gdacs"].fillna(df_merged["source_adam"])
-
-    drop_cols = [
-        "alert_level_gdacs",
-        "alert_level_adam",
-        "storm_name_gdacs",
-        "storm_name_adam",
-        "source_gdacs",
-        "source_adam",
-    ]
-    # Drop index columns if present (artefacts from earlier pipeline versions)
-    drop_cols += [c for c in ("index_gdacs", "index_adam") if c in df_merged.columns]
-    df_merged = df_merged.drop(columns=drop_cols)
-
-    # pop_50kt comes only from ADAM (no GDACS equivalent at that threshold);
-    # add _adam suffix explicitly so all pop columns are consistently source-labelled.
-    df_merged = df_merged.rename(columns={"pop_50kt": "pop_50kt_adam"})
-
+    df_merged = merge_adam_gdacs(df_adam, df_gdacs, JOIN_COLS)
     print(f"Combined columns after ADAM+GDACS merge: {df_merged.shape}")
 
     # -----------------------------------------------------------------------
@@ -211,8 +219,8 @@ def main():
     # -----------------------------------------------------------------------
     # 6. Save combined dataset to Azure blob storage
     # -----------------------------------------------------------------------
-    print(f"\nSaving {len(df_merged)} rows to {OUTPUT_CSV}...")
-    stratus.upload_csv_to_blob(df_merged, OUTPUT_CSV)
+    print(f"\nSaving {len(df_merged)} rows to {OUTPUT_ADM0_CSV}...")
+    stratus.upload_csv_to_blob(df_merged, OUTPUT_ADM0_CSV)
 
     # -----------------------------------------------------------------------
     # 7. Export to JSON for dashboard (only storms with a GDACS event_id)
@@ -230,6 +238,24 @@ def main():
     with open(OUTPUT_JSON, "w") as f:
         json.dump(output, f, indent=2)
     print(f"Exported {len(data_records)} records to {OUTPUT_JSON}")
+
+    # -----------------------------------------------------------------------
+    # 8. Load, clean, and join ADM1 data (ADAM + GDACS only; no CHD)
+    # -----------------------------------------------------------------------
+    print("\nLoading ADM1 datasets from blob storage...")
+    df_adam_adm1 = stratus.load_csv_from_blob(ADAM_ADM1_BLOB)
+    df_gdacs_adm1 = stratus.load_csv_from_blob(GDACS_ADM1_BLOB)
+    print(f"ADAM ADM1 rows:  {len(df_adam_adm1)}")
+    print(f"GDACS ADM1 rows: {len(df_gdacs_adm1)}")
+
+    df_gdacs_adm1 = df_gdacs_adm1.replace(-1, pd.NA)
+    df_adam_adm1 = make_adam_cumulative(df_adam_adm1)
+
+    df_adm1_merged = merge_adam_gdacs(df_adam_adm1, df_gdacs_adm1, JOIN_COLS_ADM1)
+    print(f"Combined ADM1 shape: {df_adm1_merged.shape}")
+
+    print(f"\nSaving {len(df_adm1_merged)} rows to {OUTPUT_ADM1_CSV}...")
+    stratus.upload_csv_to_blob(df_adm1_merged, OUTPUT_ADM1_CSV)
 
     print("Done.")
 
