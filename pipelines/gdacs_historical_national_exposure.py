@@ -291,7 +291,7 @@ def join_ibtracs(df, df_ibtracs, geo_cols):
     df_final = df_cleaned.merge(df_merged)
     assert len(df_final) == len(df_cleaned)
 
-    return df_final
+    return df_final.drop(columns=["storm_name"])
 
 
 # ---------------------------------------------------------------------------
