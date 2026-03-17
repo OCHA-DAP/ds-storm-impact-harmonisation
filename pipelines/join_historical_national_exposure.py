@@ -84,7 +84,7 @@ JOIN_COLS = [
     "storm_id",
 ]
 
-JOIN_COLS_ADM1 = JOIN_COLS + ["adm1_name"]
+JOIN_COLS_ADM1 = [c for c in JOIN_COLS if c != "country_name"] + ["adm1_name"]
 
 
 def pivot_chd(df: pd.DataFrame) -> pd.DataFrame:
