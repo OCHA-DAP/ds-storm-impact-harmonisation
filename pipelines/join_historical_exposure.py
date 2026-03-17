@@ -1,24 +1,15 @@
 """
-Join ADAM + GDACS + CHD — Historical ADM0 and ADM1 Exposure
+Join ADAM + GDACS + CHD — Historical ADM0 Exposure
 
 Loads ADM0-level population exposure estimates from the ADAM, GDACS, and CHD
 historical pipelines and joins them into a single dataset where each row is one
-storm x one ADM0 region. Also exports the combined ADM0 dataset as JSON.
-Separately joins ADAM and GDACS ADM1-level estimates into a combined ADM1 dataset.
+storm x one ADM0 region. Also exports the combined dataset as JSON.
 
 Sources:
     adam_historical_adm0_exposure.csv  — WFP ADAM wind exposure at 34/50/64 kt
+                                         (cumulative, applied in adam pipeline)
     gdacs_historical_adm0_exposure.csv — GDACS wind exposure at 34 kt / 64 kt
     adm0_ibtracs_exp_all.parquet       — CHD wind exposure at 34/50/64 kt
-    adam_historical_adm1_exposure.csv  — WFP ADAM ADM1 wind exposure at 34/50/64 kt
-    gdacs_historical_adm1_exposure.csv — GDACS ADM1 wind exposure at 34 kt / 64 kt
-
-Cleaning applied to ADAM before joining:
-    Exposure values must be cumulative (≥ threshold). ADAM stores per-band values,
-    so pop_34kt is cumsum'd from the highest threshold down, treating
-    missing higher-threshold columns as 0 to preserve partial records:
-        pop_34kt = pop_34kt + (pop_50kt or 0) + (pop_64kt or 0)
-        pop_50kt = pop_50kt + (pop_64kt or 0)  [only if pop_50kt is non-null]
 
 Join key: all shared metadata columns (everything except population exposure columns)
 CHD join key: sid + iso3 only (CHD does not carry the full metadata set)
@@ -41,31 +32,8 @@ load_dotenv()
 ADAM_ADM0_BLOB = f"{PROJECT_PREFIX}/processed/adam_historical_adm0_exposure.csv"
 GDACS_ADM0_BLOB = f"{PROJECT_PREFIX}/processed/gdacs_historical_adm0_exposure.csv"
 CHD_BLOB = f"{PROJECT_PREFIX}/processed/adm0_ibtracs_exp_all.parquet"
-ADAM_ADM1_BLOB = f"{PROJECT_PREFIX}/processed/adam_historical_adm1_exposure.csv"
-GDACS_ADM1_BLOB = f"{PROJECT_PREFIX}/processed/gdacs_historical_adm1_exposure.csv"
 OUTPUT_ADM0_CSV = f"{PROJECT_PREFIX}/processed/combined_historical_adm0_exposure.csv"
-OUTPUT_ADM1_CSV = f"{PROJECT_PREFIX}/processed/combined_historical_adm1_exposure.csv"
 OUTPUT_JSON = Path(__file__).resolve().parents[1] / "assets" / "exposure_data.json"
-
-
-def make_adam_cumulative(df: pd.DataFrame) -> pd.DataFrame:
-    """Convert ADAM per-band exposure values to cumulative (≥ threshold).
-
-    ADAM stores population counts per wind-speed band (e.g. pop_34kt is only
-    the count *between* 34 kt and 50 kt). Exposure values should be cumulative,
-    meaning pop_34kt counts everyone exposed to *at least* 34 kt. This function
-    applies a cumsum from the highest threshold downward, treating missing
-    higher-threshold values as 0 so that partial records are preserved.
-    """
-    df = df.copy()
-    v34 = df["pop_34kt"]
-    v50 = df["pop_50kt"].fillna(0)
-    v64 = df["pop_64kt"].fillna(0)
-    df["pop_34kt"] = v34.where(v34.isna(), v34 + v50 + v64)
-    df["pop_50kt"] = df["pop_50kt"].where(
-        df["pop_50kt"].isna(), df["pop_50kt"].fillna(0) + v64
-    )
-    return df
 
 
 JOIN_COLS = [
@@ -158,12 +126,6 @@ def main():
     print("Replaced -1 values in GDACS data with null.")
 
     # -----------------------------------------------------------------------
-    # 3. Make ADAM exposure values cumulative
-    # -----------------------------------------------------------------------
-    df_adam = make_adam_cumulative(df_adam)
-    print("Applied cumulative fix to ADAM exposure columns.")
-
-    # -----------------------------------------------------------------------
     # 3. Outer join ADAM + GDACS on shared metadata columns
     # -----------------------------------------------------------------------
     df_merged = merge_adam_gdacs(df_adam, df_gdacs, JOIN_COLS)
@@ -237,25 +199,6 @@ def main():
     with open(OUTPUT_JSON, "w") as f:
         json.dump(output, f, indent=2)
     print(f"Exported {len(data_records)} records to {OUTPUT_JSON}")
-
-    # -----------------------------------------------------------------------
-    # 8. Load, clean, and join ADM1 data (ADAM + GDACS only; no CHD)
-    # TODO: This needs lots of work!!
-    # -----------------------------------------------------------------------
-    print("\nLoading ADM1 datasets from blob storage...")
-    df_adam_adm1 = stratus.load_csv_from_blob(ADAM_ADM1_BLOB)
-    df_gdacs_adm1 = stratus.load_csv_from_blob(GDACS_ADM1_BLOB)
-    print(f"ADAM ADM1 rows:  {len(df_adam_adm1)}")
-    print(f"GDACS ADM1 rows: {len(df_gdacs_adm1)}")
-
-    df_gdacs_adm1 = df_gdacs_adm1.replace(-1, pd.NA)
-    df_adam_adm1 = make_adam_cumulative(df_adam_adm1)
-
-    df_adm1_merged = merge_adam_gdacs(df_adam_adm1, df_gdacs_adm1, JOIN_COLS_ADM1)
-    print(f"Combined ADM1 shape: {df_adm1_merged.shape}")
-
-    print(f"\nSaving {len(df_adm1_merged)} rows to {OUTPUT_ADM1_CSV}...")
-    stratus.upload_csv_to_blob(df_adm1_merged, OUTPUT_ADM1_CSV)
 
     print("Done.")
 

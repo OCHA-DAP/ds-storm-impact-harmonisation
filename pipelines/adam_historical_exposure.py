@@ -257,7 +257,30 @@ def build_exposure_df(df_latest):
 
 
 # ---------------------------------------------------------------------------
-# 4. Clean results and join with IBTrACS
+# 4. Make exposure values cumulative
+# ---------------------------------------------------------------------------
+
+
+def make_cumulative(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert per-band exposure values to cumulative (≥ threshold).
+
+    ADAM stores population counts per wind-speed band (e.g. pop_34kt is only
+    the count *between* 34 kt and 50 kt). This converts to cumulative so that
+    pop_34kt counts everyone exposed to *at least* 34 kt.
+    """
+    df = df.copy()
+    v34 = df["pop_34kt"]
+    v50 = df["pop_50kt"].fillna(0)
+    v64 = df["pop_64kt"].fillna(0)
+    df["pop_34kt"] = v34.where(v34.isna(), v34 + v50 + v64)
+    df["pop_50kt"] = df["pop_50kt"].where(
+        df["pop_50kt"].isna(), df["pop_50kt"].fillna(0) + v64
+    )
+    return df
+
+
+# ---------------------------------------------------------------------------
+# 5. Clean results and join with IBTrACS
 # ---------------------------------------------------------------------------
 
 
@@ -308,6 +331,10 @@ def main():
 
     print("\n=== Fetching population exposure per event ===")
     df_adm0, df_adm1 = build_exposure_df(df_latest)
+
+    print("\n=== Making exposure values cumulative ===")
+    df_adm0 = make_cumulative(df_adm0)
+    df_adm1 = make_cumulative(df_adm1)
 
     print("\n=== Joining with IBTrACS ===")
     engine = stratus.get_engine("prod")
