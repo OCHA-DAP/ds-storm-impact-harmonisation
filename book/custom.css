@@ -180,17 +180,17 @@ code {
     /* Default black text */
 }
 
-#quarto-margin-sidebar .nav-link:hover,
-#quarto-margin-sidebar .nav-link.active {
-    color: #F0635C;
-    /* Red when hovered or active */
-}
-
-/* Explicitly override default blue active color */
 #quarto-margin-sidebar .nav-link:focus,
 #quarto-margin-sidebar .nav-link:visited {
     color: black;
     /* Ensure black color for focus and visited states */
+}
+
+/* Active/hover must come AFTER :visited to take precedence (equal specificity) */
+#quarto-margin-sidebar .nav-link:hover,
+#quarto-margin-sidebar .nav-link.active {
+    color: #F0635C;
+    /* Red when hovered or active */
 }
 
 #quarto-margin-sidebar .header-section-number {

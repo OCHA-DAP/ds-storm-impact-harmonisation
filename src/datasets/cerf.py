@@ -178,13 +178,14 @@ def load_3rm_cirv(
 
 
 def load_cerf_api_data(
-    emergency_type: str = "Storm",
+    emergency_type: str | None = "Storm",
     window: str = "Rapid Response",
 ) -> pd.DataFrame:
     """Load CERF allocations from the CERF GMS API.
 
     Returns a cleaned DataFrame with one row per allocation, filtered to
-    the given emergency type and funding window.
+    the given emergency type and funding window. Pass
+    ``emergency_type=None`` to include all emergency types.
 
     Columns returned: ApplicationCode, CountryCode, CountryName, Year,
     TotalAmountApproved, FirstProjectApprovedDate, ApplicationTitle,
@@ -211,10 +212,10 @@ def load_cerf_api_data(
     df = pd.DataFrame(records)
 
     # Filter
-    df = df[
-        (df["EmergencyTypeName"] == emergency_type)
-        & (df["WindowFullName"] == window)
-    ].copy()
+    mask = df["WindowFullName"] == window
+    if emergency_type is not None:
+        mask = mask & (df["EmergencyTypeName"] == emergency_type)
+    df = df[mask].copy()
 
     # Clean types
     df["Year"] = pd.to_numeric(df["Year"], errors="coerce").astype("Int64")
