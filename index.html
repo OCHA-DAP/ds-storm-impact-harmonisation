@@ -64,10 +64,25 @@
         </div>
     </div>
 
+    <div id="adm1-modal" class="modal-overlay" style="display:none" onclick="closeAdm1Modal(event)">
+        <div class="modal-content" style="max-width:780px; max-height:50vh; overflow-y:auto;">
+            <div class="modal-header">
+                <h2 id="adm1-modal-title"></h2>
+                <button class="modal-close" onclick="closeAdm1Modal()">×</button>
+            </div>
+            <div class="source-legend" style="padding:8px 0 12px 0;">
+                <div class="source-legend-item"><div class="legend-color adam"></div><span>ADAM</span></div>
+                <div class="source-legend-item"><div class="legend-color gdacs"></div><span>GDACS</span></div>
+            </div>
+            <div id="adm1-modal-body"></div>
+        </div>
+    </div>
+
     <div id="dot-tooltip" class="dot-tooltip"></div>
 
     <script>
         let exposureData = [];
+        let adm1Data = [];
         let stormDataCache = {};
         let selectedStormSid = null;
         let currentSortColumn = 'from_date';
@@ -90,6 +105,11 @@
                 document.getElementById('storms-table-container').innerHTML =
                     '<div class="empty-state">Error loading data. Please ensure assets/exposure_data.json is available.</div>';
             });
+
+        fetch('assets/adm1_exposure_data.json')
+            .then(response => response.json())
+            .then(data => { adm1Data = data.data; })
+            .catch(() => { adm1Data = []; });
 
         function sortStorms(column) {
             if (currentSortColumn === column) {
@@ -306,6 +326,7 @@
                     };
                 } else {
                     // Merge data if we have multiple rows for the same country
+                    if (row.country_name != null) countryMap[row.iso3].country_name = row.country_name;
                     if (row.pop_64kt_adam != null) countryMap[row.iso3].pop_64kt_adam = row.pop_64kt_adam;
                     if (row.pop_50kt_adam != null) countryMap[row.iso3].pop_50kt_adam = row.pop_50kt_adam;
                     if (row.pop_34kt_adam != null) countryMap[row.iso3].pop_34kt_adam = row.pop_34kt_adam;
@@ -352,6 +373,7 @@
                             <th style="text-align: center;">High Wind (64 kt)</th>
                             <th style="text-align: center;">Medium Wind (50 kt)</th>
                             <th style="text-align: center;">Low Wind (34 kt)</th>
+                            <th></th>
                         </tr>
                     </thead>
                     <tbody>
@@ -360,12 +382,19 @@
             countries.forEach(country => {
                 const safeIso3 = (country.iso3 || '').replace(/'/g, "\\'");
                 const safeName = (country.country_name || '-').replace(/'/g, "\\'");
+                const hasAdm1 = adm1Data.some(
+                    r => r.sid === sid && r.iso3 === country.iso3
+                );
+                const adm1Link = hasAdm1
+                    ? `<span class="country-link" onclick="openAdm1Modal('${sid}', '${safeIso3}', '${safeName}')">See admin 1</span>`
+                    : '-';
                 html += `
                     <tr>
                         <td><span class="country-link" onclick="openCountryModal('${safeIso3}', '${safeName}')">${country.country_name || '-'}</span></td>
                         <td class="comparison-cell">${createStackedValues(country.pop_64kt_adam, country.pop_64kt_gdacs, country.pop_64kt_chd)}</td>
                         <td class="comparison-cell">${createStackedValues(country.pop_50kt_adam, null, country.pop_50kt_chd)}</td>
                         <td class="comparison-cell">${createStackedValues(country.pop_34kt_adam, country.pop_34kt_gdacs, country.pop_34kt_chd)}</td>
+                        <td style="white-space:nowrap;">${adm1Link}</td>
                     </tr>
                 `;
             });
@@ -528,6 +557,71 @@
             if (!e || e.target === document.getElementById('country-modal')) {
                 document.getElementById('country-modal').style.display = 'none';
                 document.getElementById('dot-tooltip').style.display = 'none';
+            }
+        }
+
+        function openAdm1Modal(sid, iso3, countryName) {
+            document.getElementById('adm1-modal-title').textContent =
+                `Admin 1 Exposure — ${countryName}`;
+            document.getElementById('adm1-modal-body').innerHTML =
+                renderAdm1Table(sid, iso3);
+            document.getElementById('adm1-modal').style.display = 'flex';
+        }
+
+        function renderAdm1Table(sid, iso3) {
+            const rows = adm1Data.filter(r => r.sid === sid && r.iso3 === iso3);
+            if (rows.length === 0) return '<div class="empty-state">No admin 1 data available.</div>';
+
+            const formatNumber = (val) => {
+                if (val == null || val === '') return '-';
+                return Math.round(val).toLocaleString();
+            };
+
+            const createStackedValues = (adamVal, gdacsVal) => {
+                const adamDisplay = adamVal != null ? formatNumber(adamVal) : '-';
+                const gdacsDisplay = gdacsVal != null ? formatNumber(gdacsVal) : '-';
+                return `
+                    <div class="stacked-values">
+                        <div class="${adamVal != null ? 'adam-value' : 'no-data'}">${adamDisplay}</div>
+                        <div class="${gdacsVal != null ? 'gdacs-value' : 'no-data'}">${gdacsDisplay}</div>
+                    </div>
+                `;
+            };
+
+            // Sort by adm1_name
+            const sorted = [...rows].sort((a, b) =>
+                (a.adm1_name || '').localeCompare(b.adm1_name || '')
+            );
+
+            let html = `
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Admin 1</th>
+                            <th style="text-align:center;">High Wind (64 kt)</th>
+                            <th style="text-align:center;">Medium Wind (50 kt)</th>
+                            <th style="text-align:center;">Low Wind (34 kt)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+            sorted.forEach(row => {
+                html += `
+                    <tr>
+                        <td>${row.adm1_name || '-'}</td>
+                        <td class="comparison-cell">${createStackedValues(row.pop_64kt_adam, row.pop_64kt_gdacs)}</td>
+                        <td class="comparison-cell">${createStackedValues(row.pop_50kt_adam, null)}</td>
+                        <td class="comparison-cell">${createStackedValues(row.pop_34kt_adam, row.pop_34kt_gdacs)}</td>
+                    </tr>
+                `;
+            });
+            html += '</tbody></table>';
+            return html;
+        }
+
+        function closeAdm1Modal(e) {
+            if (!e || e.target === document.getElementById('adm1-modal')) {
+                document.getElementById('adm1-modal').style.display = 'none';
             }
         }
     </script>

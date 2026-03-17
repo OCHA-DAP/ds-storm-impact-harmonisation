@@ -88,6 +88,10 @@ th {
     background: white;
 }
 
+#adm1-modal-body th {
+    position: static;
+}
+
 td {
     padding: 10px 12px;
     font-size: 14px;
@@ -391,6 +395,7 @@ td a:hover {
     text-transform: uppercase;
     letter-spacing: 0.03em;
 }
+
 
 .dot-tooltip {
     position: fixed;

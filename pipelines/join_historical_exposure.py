@@ -1,18 +1,22 @@
 """
-Join ADAM + GDACS + CHD — Historical ADM0 Exposure
+Join ADAM + GDACS + CHD — Historical ADM0 and ADM1 Exposure
 
 Loads ADM0-level population exposure estimates from the ADAM, GDACS, and CHD
 historical pipelines and joins them into a single dataset where each row is one
-storm x one ADM0 region. Also exports the combined dataset as JSON.
+storm x one ADM0 region. Also joins ADM1-level data from ADAM and GDACS, and
+exports both combined datasets as JSON.
 
 Sources:
     adam_historical_adm0_exposure.csv  — WFP ADAM wind exposure at 34/50/64 kt
                                          (cumulative, applied in adam pipeline)
     gdacs_historical_adm0_exposure.csv — GDACS wind exposure at 34 kt / 64 kt
     adm0_ibtracs_exp_all.parquet       — CHD wind exposure at 34/50/64 kt
+    adam_historical_adm1_exposure.csv  — WFP ADAM ADM1 wind exposure at 34/50/64 kt
+    gdacs_historical_adm1_exposure.csv — GDACS ADM1 wind exposure at 34 kt / 64 kt
 
 Join key: all shared metadata columns (everything except population exposure columns)
 CHD join key: sid + iso3 only (CHD does not carry the full metadata set)
+ADM1 join key: JOIN_COLS + adm1_name (note: ADAM and GDACS may use different names)
 """
 
 import json
@@ -35,6 +39,12 @@ CHD_BLOB = f"{PROJECT_PREFIX}/processed/adm0_ibtracs_exp_all.parquet"
 OUTPUT_ADM0_CSV = f"{PROJECT_PREFIX}/processed/combined_historical_adm0_exposure.csv"
 OUTPUT_JSON = Path(__file__).resolve().parents[1] / "assets" / "exposure_data.json"
 
+ADAM_ADM1_BLOB = f"{PROJECT_PREFIX}/processed/adam_historical_adm1_exposure.csv"
+GDACS_ADM1_BLOB = f"{PROJECT_PREFIX}/processed/gdacs_historical_adm1_exposure.csv"
+OUTPUT_ADM1_JSON = (
+    Path(__file__).resolve().parents[1] / "assets" / "adm1_exposure_data.json"
+)
+
 
 JOIN_COLS = [
     "sid",
@@ -50,6 +60,8 @@ JOIN_COLS = [
     "provisional",
     "storm_id",
 ]
+
+JOIN_COLS_ADM1 = JOIN_COLS + ["adm1_name"]
 
 
 def pivot_chd(df: pd.DataFrame) -> pd.DataFrame:
@@ -83,13 +95,21 @@ def merge_adam_gdacs(df_adam, df_gdacs, join_cols):
         df_merged["alert_level_adam"]
     )
     df_merged["source"] = df_merged["source_gdacs"].fillna(df_merged["source_adam"])
-
     drop_cols = [
         "alert_level_gdacs",
         "alert_level_adam",
         "source_gdacs",
         "source_adam",
     ]
+    has_cn = (
+        "country_name_gdacs" in df_merged.columns
+        and "country_name_adam" in df_merged.columns
+    )
+    if has_cn:
+        df_merged["country_name"] = df_merged["country_name_gdacs"].fillna(
+            df_merged["country_name_adam"]
+        )
+        drop_cols += ["country_name_gdacs", "country_name_adam"]
     drop_cols += [c for c in ("index_gdacs", "index_adam") if c in df_merged.columns]
     df_merged = df_merged.drop(columns=drop_cols)
 
@@ -192,6 +212,27 @@ def main():
     with open(OUTPUT_JSON, "w") as f:
         json.dump(output, f, indent=2)
     print(f"Exported {len(data_records)} records to {OUTPUT_JSON}")
+
+    # -----------------------------------------------------------------------
+    # 8. Join ADM1 data (ADAM + GDACS only) and export to JSON
+    # -----------------------------------------------------------------------
+    print("\nLoading ADM1 datasets from blob storage...")
+    df_adam_adm1 = stratus.load_csv_from_blob(ADAM_ADM1_BLOB)
+    df_gdacs_adm1 = stratus.load_csv_from_blob(GDACS_ADM1_BLOB)
+    df_gdacs_adm1 = df_gdacs_adm1.replace(-1, pd.NA)
+    print(f"ADAM ADM1 rows: {len(df_adam_adm1)}")
+    print(f"GDACS ADM1 rows: {len(df_gdacs_adm1)}")
+
+    df_adm1 = merge_adam_gdacs(df_adam_adm1, df_gdacs_adm1, JOIN_COLS_ADM1)
+    print(f"Combined ADM1 shape after merge: {df_adm1.shape}")
+
+    df_adm1_json = df_adm1[df_adm1["event_id"].notna()]
+    df_adm1_json = df_adm1_json.replace({pd.NA: None, float("nan"): None})
+    df_adm1_json = df_adm1_json.where(pd.notna(df_adm1_json), None)
+    adm1_records = df_adm1_json.to_dict(orient="records")
+    with open(OUTPUT_ADM1_JSON, "w") as f:
+        json.dump({"data": adm1_records}, f, indent=2)
+    print(f"Exported {len(adm1_records)} ADM1 records to {OUTPUT_ADM1_JSON}")
 
     print("Done.")
 
