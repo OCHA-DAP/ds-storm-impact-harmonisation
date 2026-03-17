@@ -51,8 +51,6 @@ JOIN_COLS = [
     "storm_id",
 ]
 
-JOIN_COLS_ADM1 = [c for c in JOIN_COLS if c != "country_name"] + ["adm1_name"]
-
 
 def pivot_chd(df: pd.DataFrame) -> pd.DataFrame:
     """Pivot CHD data from long format to wide format with source-labelled columns.
@@ -84,16 +82,11 @@ def merge_adam_gdacs(df_adam, df_gdacs, join_cols):
     df_merged["alert_level"] = df_merged["alert_level_gdacs"].fillna(
         df_merged["alert_level_adam"]
     )
-    df_merged["storm_name"] = df_merged["storm_name_gdacs"].fillna(
-        df_merged["storm_name_adam"]
-    )
     df_merged["source"] = df_merged["source_gdacs"].fillna(df_merged["source_adam"])
 
     drop_cols = [
         "alert_level_gdacs",
         "alert_level_adam",
-        "storm_name_gdacs",
-        "storm_name_adam",
         "source_gdacs",
         "source_adam",
     ]
