@@ -302,8 +302,6 @@ def join_ibtracs(df, df_ibtracs, geo_cols):
 def main():
     print("=== Fetching all TC events ===")
     df_events = fetch_all_events()
-    # TODO: Temp for testing!!
-    df_events = df_events.head(10)
 
     print("\n=== Fetching population exposure per event ===")
     df_adm0, df_adm1 = build_exposure_df(df_events)

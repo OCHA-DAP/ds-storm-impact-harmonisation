@@ -79,7 +79,6 @@ JOIN_COLS = [
     "genesis_basin",
     "event_id",
     "episode_id",
-    "country_name",
     "provisional",
     "storm_id",
 ]
@@ -241,6 +240,7 @@ def main():
 
     # -----------------------------------------------------------------------
     # 8. Load, clean, and join ADM1 data (ADAM + GDACS only; no CHD)
+    # TODO: This needs lots of work!!
     # -----------------------------------------------------------------------
     print("\nLoading ADM1 datasets from blob storage...")
     df_adam_adm1 = stratus.load_csv_from_blob(ADAM_ADM1_BLOB)
