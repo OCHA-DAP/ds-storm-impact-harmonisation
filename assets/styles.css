@@ -89,7 +89,7 @@ th {
 }
 
 #adm1-modal-body th {
-    position: static;
+    position: static !important;
 }
 
 td {

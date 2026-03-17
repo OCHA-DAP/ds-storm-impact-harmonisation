@@ -605,7 +605,11 @@
                     </thead>
                     <tbody>
             `;
+            const totals = { pop_64kt_adam: null, pop_64kt_gdacs: null, pop_50kt_adam: null, pop_34kt_adam: null, pop_34kt_gdacs: null };
             sorted.forEach(row => {
+                for (const key of Object.keys(totals)) {
+                    if (row[key] != null) totals[key] = (totals[key] || 0) + row[key];
+                }
                 html += `
                     <tr>
                         <td>${row.adm1_name || '-'}</td>
@@ -615,7 +619,17 @@
                     </tr>
                 `;
             });
-            html += '</tbody></table>';
+            html += `
+                    </tbody>
+                    <tfoot>
+                        <tr style="font-weight:600; border-top: 2px solid #007CE0;">
+                            <td>Total</td>
+                            <td class="comparison-cell">${createStackedValues(totals.pop_64kt_adam, totals.pop_64kt_gdacs)}</td>
+                            <td class="comparison-cell">${createStackedValues(totals.pop_50kt_adam, null)}</td>
+                            <td class="comparison-cell">${createStackedValues(totals.pop_34kt_adam, totals.pop_34kt_gdacs)}</td>
+                        </tr>
+                    </tfoot>
+                </table>`;
             return html;
         }
 
