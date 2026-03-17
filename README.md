@@ -17,11 +17,9 @@ Install pre-commit hooks:
 uv run pre-commit install
 ```
 
-Copy `.env.example` to `.env` and fill in the required credentials before running any pipelines.
-
 ## Running the pipelines
 
-Run scripts in order. Each saves output to Azure blob storage under the `ds-storm-impact-harmonization/` prefix.
+Run scripts in order. Each saves output to Azure blob storage under the `ds-storm-impact-harmonisation/` prefix.
 
 ```bash
 uv run python pipelines/adam_historical_national_exposure.py
