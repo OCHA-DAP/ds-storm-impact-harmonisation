@@ -5,3 +5,4 @@ book/_freeze/
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
+artefacts/

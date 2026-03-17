@@ -28,58 +28,17 @@ warnings.filterwarnings("ignore", module="plotnine")
 
 load_dotenv()
 
-df_cerf = stratus.load_csv_from_blob(
-    "ds-storm-impact-harmonisation/processed/cerf-storms-with-sids-2024-02-27.csv"
-)
 df_ocha = stratus.load_parquet_from_blob(
     "ds-storm-impact-harmonisation/processed/adm0_ibtracs_exp_all.parquet"
 )
-```
-
-## CERF Storm Allocations
-
-The CERF dataset contains **storm-related allocation records** — each row is a
-funding allocation to a specific country for a specific storm event.
-
-```{python}
-#| label: cerf-overview
-print(f"Rows: {len(df_cerf)}")
-print(f"Countries: {df_cerf['iso2'].nunique()}")
-print(f"Unique storms (sid): {df_cerf['sid'].nunique()} ({df_cerf['sid'].isna().sum()} rows missing sid)")
-print(f"Allocation years: {int(df_cerf['allocation_year'].min())}–{int(df_cerf['allocation_year'].max())}")
-print(f"Total allocated: ${df_cerf['Amount in US$'].sum():,.0f}")
-```
-
-```{python}
-#| label: cerf-by-year
-#| fig-cap: "CERF storm allocations by year"
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
-
-yearly = df_cerf.groupby("allocation_year").agg(
-    n_allocations=("Amount in US$", "size"),
-    total_usd=("Amount in US$", "sum"),
-)
-
-ax1.bar(yearly.index, yearly["n_allocations"], color="#4292c6", edgecolor="#666")
-ax1.set_xlabel("Year")
-ax1.set_ylabel("Number of allocations")
-ax1.set_title("Allocation count")
-
-ax2.bar(yearly.index, yearly["total_usd"] / 1e6, color="#ef6548", edgecolor="#666")
-ax2.set_xlabel("Year")
-ax2.set_ylabel("Amount (millions USD)")
-ax2.set_title("Total amount allocated")
-
-plt.tight_layout()
-plt.show()
 ```
 
 ## OCHA Cyclone Exposure Dataset
 
 The ADAM and GDACS exposure datasets proved unusable for this analysis due to
 temporal gaps (see @sec-gdacs-completeness). However, the **OCHA exposure
-dataset** (`adm0_ibtracs_exp_all.parquet`) covers 2001–2026 with 1,271 storms
-and uses IBTrACS `sid` directly — giving us near-complete overlap with CERF.
+dataset** (`adm0_ibtracs_exp_all.parquet`) covers 2001--2026 with 1,271 storms
+and uses IBTrACS `sid` directly --- giving us near-complete overlap with CERF.
 
 ```{python}
 #| label: ocha-overview
@@ -132,255 +91,312 @@ storms_per_year = (
 )
 ```
 
-## Storm ID Matching {#sec-sid-matching}
+## CERF Storm Allocations (API Pipeline)
 
-Linking CERF allocations to exposure data requires matching on IBTrACS
-storm IDs (`sid`). The raw CERF dataset includes manually assigned sids for
-most rows, but some are missing. We supplement these with algorithmic
-matching and a small number of manual overrides.
-
-::: {.callout-warning appearance="simple"}
-The storm ID matching in this analysis is **not fully validated**. The
-original CERF dataset contains manually matched sids of unknown
-completeness. Our additions use algorithmic lookups (highest-exposure
-storm in a lookback window) and AI/LLM-assisted identification, and have
-not been thoroughly reviewed. Results should be interpreted with this
-caveat in mind.
-:::
-
-### Coverage Breakdown
+CERF storm allocation data is sourced from the
+[CERF GMS API](https://cerfgms-webapi.unocha.org/v1/application/All.xml),
+filtered to **Storm** emergency type and **Rapid Response** window. Each
+allocation is linked to an IBTrACS storm via a curated
+`ApplicationCode -> sid` dictionary (`CERFCODE_TO_SID` in `src/datasets/cerf.py`).
 
 ```{python}
-#| label: cerf-sid-breakdown
-#| fig-cap: "CERF allocation coverage: rows with original sids, auto-matched, and unmatched."
-from src.datasets.cerf import ISO2_TO_ISO3
-
-df_cerf["iso3"] = df_cerf["iso2"].map(ISO2_TO_ISO3)
-
-n_total = len(df_cerf)
-n_with_sid = df_cerf["sid"].notna().sum()
-n_without_sid = df_cerf["sid"].isna().sum()
-n_unique_sids = df_cerf["sid"].nunique()
-
-print(f"Total CERF rows:     {n_total}")
-print(f"  With sid:          {n_with_sid} ({n_unique_sids} unique storms)")
-print(f"  Without sid:       {n_without_sid}")
-```
-
-### Missing Storm IDs
-
-```{python}
-#| label: missing-sids-detail
-missing = df_cerf[df_cerf["sid"].isna()].sort_values("Allocation date")
-print(f"{len(missing)} of {len(df_cerf)} rows ({len(missing)/len(df_cerf):.0%}) have no sid")
-missing[["Country", "iso3", "Allocation date", "allocation_year", "Amount in US$"]]
-```
-
-Some of these are likely genuine tropical cyclone allocations with missing
-storm IDs due to data quality issues in the input dataset. Others may be
-misclassified — spot-checking allocation reports confirms that
-[Bolivia (2010)](https://cerf.un.org/sites/default/files/resources/BOLIVIA%20NARRATIVE%20REPORT%202010%20FINAL%202%20August%202011.pdf)
-makes no mention of a cyclone,
-[Cuba (2019)](https://cerf.un.org/sites/default/files/resources/19-RR-CUB-34583_Cuba_RCHC_Report.pdf)
-was for tornado damage, and
-[Ghana (2007)](https://cerf.un.org/sites/default/files/resources/CERF%202007%20Annual%20Report%20Ghana%20FINAL_WEB.pdf)
-was for inland flooding rather than a tropical cyclone.
-
-### Duplicate Allocations
-
-Some storms received multiple CERF allocations to the same country
-(e.g. separate rapid-response and underfunded-emergency windows).
-
-```{python}
-#| label: duplicate-allocations
-cerf_with_sid = df_cerf.dropna(subset=["sid"])
-dupes = cerf_with_sid.groupby(["sid", "iso3"]).agg(
-    n=("Amount in US$", "size"),
-    total_usd=("Amount in US$", "sum"),
-    country=("Country", "first"),
-).reset_index()
-dupes = dupes[dupes["n"] > 1].sort_values("n", ascending=False)
-
-if len(dupes) > 0:
-    print(f"{len(dupes)} storm-country pairs with multiple allocations:")
-    display(dupes[["country", "iso3", "sid", "n", "total_usd"]])
-else:
-    print("No duplicates found")
-```
-
-### Auto-Matching Missing Storm IDs
-
-We use a simple heuristic: for each CERF row missing a sid, find storms
-in the OCHA exposure data that affected the same country within the year
-before the allocation date, and pick the largest by population exposed.
-Manual overrides are applied where we know the correct match.
-
-```{python}
-#| label: auto-match
-from src.datasets.cerf import assign_sids, DEFAULT_MANUAL_OVERRIDES
-
-df_cerf_matched = assign_sids(
-    df_cerf, df_ocha, manual_overrides=DEFAULT_MANUAL_OVERRIDES
+#| label: cerf-api-overview
+from src.datasets.cerf import (
+    load_cerf_api_data,
+    apply_cerfcode_sids,
+    build_analysis_dataset_api,
+    CERFCODE_TO_SID,
 )
 
-print("=== SID source counts ===")
-print(df_cerf_matched["sid_source"].value_counts(dropna=False))
-print(f"\nTotal sids now: {df_cerf_matched['sid'].notna().sum()} of {len(df_cerf_matched)}")
-print(f"Unique sids: {df_cerf_matched['sid'].nunique()}")
+df_cerf_api = load_cerf_api_data()
+print(f"CERF API storm allocations: {len(df_cerf_api)}")
+print(f"Year range: {int(df_cerf_api['Year'].min())}–{int(df_cerf_api['Year'].max())}")
+print(f"Countries: {df_cerf_api['CountryCode'].nunique()}")
+
+n_matched = sum(1 for v in CERFCODE_TO_SID.values() if v is not None)
+n_non_tc = sum(1 for v in CERFCODE_TO_SID.values() if v is None)
+print(f"\nCERFCODE_TO_SID: {len(CERFCODE_TO_SID)} entries")
+print(f"  Matched to TC: {n_matched}")
+print(f"  Non-TC (excluded): {n_non_tc}")
 ```
 
 ```{python}
-#| label: auto-match-results
-# Look up storm names from IBTrACS
+#| label: storm-name-lookup
+#| output: false
+# Build a global storm name lookup from IBTrACS
 engine = stratus.get_engine("prod")
-matched_sids = df_cerf_matched.loc[
-    df_cerf_matched["sid_source"].isin(["auto", "manual"]), "sid"
-].unique().tolist()
+all_sids = sorted({s for s in CERFCODE_TO_SID.values() if s is not None})
 with engine.connect() as conn:
     sid_names = pd.read_sql(
         f"SELECT sid, name FROM storms.ibtracs_storms "
-        f"WHERE sid IN ({','.join(repr(s) for s in matched_sids)})",
+        f"WHERE sid IN ({','.join(repr(s) for s in all_sids)})",
         conn,
     )
 sid_name_map = dict(zip(sid_names["sid"], sid_names["name"]))
+```
 
-newly_matched = df_cerf_matched[df_cerf_matched["sid_source"].isin(["auto", "manual"])].copy()
-newly_matched["storm_name"] = newly_matched["sid"].map(sid_name_map)
+### Non-TC Allocations
 
-tbl_df = (
-    newly_matched[["Country", "storm_name", "sid", "Allocation date", "sid_source", "Amount in US$"]]
-    .sort_values("Allocation date")
+These allocations are classified as "Storm" in the CERF system but are
+not tropical cyclones (inland flooding, tornadoes, etc.). They are
+excluded from the analysis.
+
+```{python}
+#| label: non-tc
+df_matched = apply_cerfcode_sids(df_cerf_api)
+non_tc_codes = {k for k, v in CERFCODE_TO_SID.items() if v is None}
+non_tc = df_cerf_api[df_cerf_api["ApplicationCode"].isin(non_tc_codes)]
+display(
+    non_tc[["ApplicationCode", "CountryName", "Year", "TotalAmountApproved"]]
+    .sort_values("Year")
     .reset_index(drop=True)
     .rename(columns={
-        "storm_name": "Cyclone",
-        "Allocation date": "Allocation Date",
-        "sid_source": "Match Method",
-        "Amount in US$": "Amount (USD)",
+        "CountryName": "Country",
+        "TotalAmountApproved": "Amount (USD)",
     })
 )
-
-(
-    GT(tbl_df)
-    .tab_header(
-        title="Newly Matched CERF Allocations",
-        subtitle=f"{len(tbl_df)} rows recovered via auto/manual storm ID matching",
-    )
-    .fmt_currency("Amount (USD)", currency="USD", decimals=0)
-    .tab_style(
-        style=style.fill(color="#e6f3e6"),
-        locations=loc.body(rows=tbl_df.index[tbl_df["Match Method"] == "manual"].tolist()),
-    )
-    .tab_style(
-        style=style.fill(color="#e6eeff"),
-        locations=loc.body(rows=tbl_df.index[tbl_df["Match Method"] == "auto"].tolist()),
-    )
-    .tab_source_note("Green = manual override, Blue = auto-matched (highest exposure in lookback window)")
-)
 ```
 
-```{python}
-#| label: still-missing
-still_missing = df_cerf_matched[df_cerf_matched["sid"].isna()]
-if len(still_missing) > 0:
-    print(f"{len(still_missing)} rows still without sid (likely non-TC events):")
-    display(still_missing[["Country", "iso3", "Allocation date", "allocation_year", "Amount in US$"]])
-```
-
-```{python}
-#| label: match-summary-visual
-#| fig-cap: "CERF allocation coverage after sid matching. Most storm allocations can now be linked to exposure data."
-source_order = ["original", "manual", "auto", "unmatched"]
-source_colors = {"original": "#4292c6", "manual": "#fd8d3c", "auto": "#74c476", "unmatched": "#bdbdbd"}
-
-summary = df_cerf_matched.copy()
-summary["source"] = summary["sid_source"].fillna("unmatched")
-summary["source"] = pd.Categorical(summary["source"], categories=source_order, ordered=True)
-
-counts = summary.groupby("source", observed=False).agg(
-    n_rows=("Amount in US$", "size"),
-    amount_m=("Amount in US$", lambda x: x.sum() / 1e6),
-).reset_index()
-
-counts_long = counts.melt(id_vars="source", var_name="metric", value_name="value")
-counts_long["metric"] = counts_long["metric"].map({
-    "n_rows": "Number of rows",
-    "amount_m": "Amount (millions USD)",
-})
-
-(
-    ggplot(counts_long, aes("source", "value", fill="source"))
-    + geom_col(color="#666666", show_legend=False)
-    + geom_text(aes(label="value"), va="bottom", format_string="{:.0f}", size=9)
-    + scale_fill_manual(values=source_colors)
-    + facet_wrap("~metric", scales="free_y")
-    + labs(x="", y="", title="CERF Allocations by SID Source")
-    + theme_minimal()
-    + theme(figure_size=(12, 4))
-)
-```
-
-## CERF–Exposure Merge
-
-```{python}
-#| label: merge-setup
-#| output: false
-ocha_wide = pivot_ocha_wide(df_ocha)
-```
-
-### Merge on `sid` + `iso3`
-
-Using the enhanced CERF data (with auto and manual sid matches):
+## CERF--Exposure Merge
 
 ```{python}
 #| label: merge
-cerf_valid = df_cerf_matched.dropna(subset=["sid"])
-merged = cerf_valid.merge(ocha_wide, on=["sid", "iso3"], how="left")
-
-exp_cols = ["pop_exp_34kt", "pop_exp_50kt", "pop_exp_64kt"]
-has_exp = merged.dropna(subset=exp_cols, how="all")
-no_exp = merged[merged[exp_cols].isna().all(axis=1)]
-
-print(f"CERF rows total:            {len(df_cerf_matched)}")
-print(f"CERF rows with sid:         {len(cerf_valid)}")
-print(f"  → matched with exposure:  {len(has_exp)} ({has_exp['sid'].nunique()} storms)")
-print(f"  → sid but no exposure:    {len(no_exp)} ({no_exp['sid'].nunique()} storms)")
-print(f"  → no sid at all:          {df_cerf_matched['sid'].isna().sum()} rows")
+#| output: false
+merged_agg = build_analysis_dataset_api(df_ocha)
+merged_agg["storm_name"] = merged_agg["sid"].map(sid_name_map)
 ```
 
-```{python}
-#| label: unmatched
-if len(no_exp) > 0:
-    print("Rows with sid but no exposure for that country:")
-    display(no_exp[["Country", "iso3", "sid", "sid_source", "allocation_year", "Amount in US$"]])
-```
-
-Most unmatched rows here are Cyclone FREDDY (`2023036S12117`), which is absent
-from the OCHA exposure dataset entirely. A near-miss sid (`2023036S12163`) exists
-but belongs to Cyclone GABRIELLE — FREDDY was simply never processed by the
-exposure pipeline despite being one of the longest-lived TCs on record.
-
-### Aggregated Dataset
+### Merged Dataset
 
 ```{python}
-#| label: aggregate
-merged_agg = has_exp.groupby(["sid", "iso3", "Country"]).agg(
-    total_usd=("Amount in US$", "sum"),
-    n_allocations=("Amount in US$", "size"),
-    allocation_year=("allocation_year", "first"),
-    sid_source=("sid_source", "first"),
-    pop_exp_34kt=("pop_exp_34kt", "first"),
-    pop_exp_50kt=("pop_exp_50kt", "first"),
-    pop_exp_64kt=("pop_exp_64kt", "first"),
-).reset_index()
-
-print(f"Unique storm-country pairs: {len(merged_agg)}")
-print(f"Total CERF amount: ${merged_agg['total_usd'].sum():,.0f}")
+#| label: merge-summary
+print(f"Storm-country pairs: {len(merged_agg)}")
+print(f"Unique storms: {merged_agg['sid'].nunique()}")
+print(f"Countries: {merged_agg['iso3'].nunique()}")
+print(f"Year range: {int(merged_agg['allocation_year'].min())}–{int(merged_agg['allocation_year'].max())}")
+print(f"Total CERF: ${merged_agg['total_usd'].sum():,.0f}")
 ```
 
 ```{python}
 #| label: merged-table
 merged_agg.sort_values("total_usd", ascending=False)[
-    ["Country", "iso3", "sid", "sid_source", "allocation_year", "total_usd",
+    ["Country", "iso3", "sid", "storm_name", "allocation_year", "total_usd",
      "pop_exp_34kt", "pop_exp_50kt", "pop_exp_64kt"]
 ]
+```
+
+```{python}
+#| label: cerf-by-year
+#| fig-cap: "CERF storm allocations by year (API pipeline, after merge with exposure data)."
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+
+yearly = merged_agg.groupby("allocation_year").agg(
+    n_allocations=("total_usd", "size"),
+    total_usd=("total_usd", "sum"),
+)
+
+ax1.bar(yearly.index, yearly["n_allocations"], color="#4292c6", edgecolor="#666")
+ax1.set_xlabel("Year")
+ax1.set_ylabel("Number of storm-country pairs")
+ax1.set_title("Allocation count")
+
+ax2.bar(yearly.index, yearly["total_usd"] / 1e6, color="#ef6548", edgecolor="#666")
+ax2.set_xlabel("Year")
+ax2.set_ylabel("Amount (millions USD)")
+ax2.set_title("Total amount allocated")
+
+plt.tight_layout()
+plt.show()
+```
+
+## Exposure Coverage Gaps {#sec-exposure-gaps}
+
+Not all storms with CERF allocations have corresponding entries in the OCHA
+exposure dataset. This section documents the coverage gap.
+
+```{python}
+#| label: exposure-gap-setup
+#| output: false
+cerf_valid_api = df_matched.dropna(subset=["sid"])
+ocha_wide_api = pivot_ocha_wide(df_ocha)
+merged_api = cerf_valid_api.merge(ocha_wide_api, on=["sid", "iso3"], how="left")
+exp_cols = ["pop_exp_34kt", "pop_exp_50kt", "pop_exp_64kt"]
+merged_api["has_exposure"] = ~merged_api[exp_cols].isna().all(axis=1)
+```
+
+### Summary
+
+```{python}
+#| label: exposure-gap-summary
+n_tc = len(cerf_valid_api)
+n_with_exp = merged_api["has_exposure"].sum()
+n_without_exp = (~merged_api["has_exposure"]).sum()
+n_sids_missing = merged_api.loc[~merged_api["has_exposure"], "sid"].nunique()
+
+print(f"CERF allocations matched to TC sids: {n_tc}")
+print(f"  → with exposure data:              {n_with_exp}")
+print(f"  → without exposure data:           {n_without_exp} ({n_sids_missing} unique storms)")
+```
+
+### Missing storm--country pairs
+
+The table below lists CERF allocations that have a valid IBTrACS sid but no
+matching record in the OCHA exposure data. There are two causes:
+
+1. **Storm absent entirely** --- the storm was never processed by the OCHA
+   exposure pipeline (no records for any country).
+2. **Country not covered** --- the storm exists in the exposure data but
+   not for the specific country that received CERF funding.
+
+```{python}
+#| label: exposure-gap-detail
+gap = merged_api[~merged_api["has_exposure"]].copy()
+
+# Check which sids have *any* record in OCHA exposure
+all_ocha_sids = set(df_ocha["sid"].unique())
+gap["sid_in_ocha"] = gap["sid"].isin(all_ocha_sids)
+gap["gap_reason"] = gap["sid_in_ocha"].map(
+    {False: "Storm absent from exposure data", True: "Country not in exposure for this storm"}
+)
+
+gap["storm_name"] = gap["sid"].map(sid_name_map)
+
+display(
+    gap[["Country", "iso3", "sid", "storm_name", "allocation_year", "Amount in US$", "gap_reason"]]
+    .sort_values(["gap_reason", "allocation_year"])
+    .reset_index(drop=True)
+)
+```
+
+```{python}
+#| label: exposure-gap-by-reason
+gap_summary = (
+    gap.groupby("gap_reason")
+    .agg(
+        n_rows=("sid", "size"),
+        n_storms=("sid", "nunique"),
+        total_usd=("Amount in US$", "sum"),
+    )
+    .reset_index()
+)
+
+(
+    GT(gap_summary)
+    .tab_header(
+        title="CERF Allocations Without Exposure Data",
+    )
+    .cols_label(
+        gap_reason="Reason",
+        n_rows="Rows",
+        n_storms="Unique storms",
+        total_usd="Amount (USD)",
+    )
+    .fmt_currency("total_usd", currency="USD", decimals=0)
+)
+```
+
+These gaps represent a data limitation --- the OCHA exposure pipeline has not
+processed every storm. Notably absent are storms like **FREDDY** (2023),
+one of the longest-lived tropical cyclones on record, and **GAMANE** (2024).
+These allocations are excluded from the regression analysis but remain in
+the full CERF inventory for reference.
+
+## Comparison with Old CSV Pipeline {#sec-pipeline-comparison}
+
+The original analysis used a CSV export with manually assigned storm IDs
+and algorithmic auto-matching. The API pipeline replaces this with a curated
+dictionary. This section compares the resulting analysis datasets.
+
+```{python}
+#| label: pipeline-compare-setup
+#| output: false
+from src.datasets.cerf import build_analysis_dataset, DEFAULT_MANUAL_OVERRIDES
+
+df_cerf_old = stratus.load_csv_from_blob(
+    "ds-storm-impact-harmonisation/processed/cerf-storms-with-sids-2024-02-27.csv"
+)
+merged_old = build_analysis_dataset(
+    df_cerf_old, df_ocha, manual_overrides=DEFAULT_MANUAL_OVERRIDES
+)
+merged_old["storm_name"] = merged_old["sid"].map(sid_name_map)
+```
+
+```{python}
+#| label: pipeline-summary
+summary_df = pd.DataFrame([
+    {
+        "Pipeline": "Old CSV",
+        "Storm-country pairs": len(merged_old),
+        "Unique storms": merged_old["sid"].nunique(),
+        "Countries": merged_old["iso3"].nunique(),
+        "Year range": f"{int(merged_old['allocation_year'].min())}–{int(merged_old['allocation_year'].max())}",
+        "Total CERF (USD)": merged_old["total_usd"].sum(),
+    },
+    {
+        "Pipeline": "CERF API",
+        "Storm-country pairs": len(merged_agg),
+        "Unique storms": merged_agg["sid"].nunique(),
+        "Countries": merged_agg["iso3"].nunique(),
+        "Year range": f"{int(merged_agg['allocation_year'].min())}–{int(merged_agg['allocation_year'].max())}",
+        "Total CERF (USD)": merged_agg["total_usd"].sum(),
+    },
+])
+
+(
+    GT(summary_df)
+    .tab_header(title="Pipeline Comparison Summary")
+    .fmt_currency("Total CERF (USD)", currency="USD", decimals=0)
+    .fmt_number(["Storm-country pairs", "Unique storms", "Countries"], decimals=0)
+)
+```
+
+### New pairs in API pipeline
+
+```{python}
+#| label: new-pairs
+old_keys = set(zip(merged_old["sid"], merged_old["iso3"]))
+new_pairs = merged_agg[
+    ~merged_agg.apply(lambda r: (r["sid"], r["iso3"]) in old_keys, axis=1)
+].copy()
+
+(
+    GT(
+        new_pairs[["Country", "iso3", "sid", "storm_name", "allocation_year", "total_usd"]]
+        .sort_values("allocation_year")
+        .reset_index(drop=True)
+        .rename(columns={"total_usd": "Amount (USD)", "allocation_year": "Year", "storm_name": "Storm"})
+    )
+    .tab_header(
+        title=f"{len(new_pairs)} New Storm-Country Pairs",
+        subtitle="In API pipeline but not in old CSV pipeline",
+    )
+    .fmt_currency("Amount (USD)", currency="USD", decimals=0)
+)
+```
+
+### Pairs dropped from old pipeline
+
+```{python}
+#| label: dropped-pairs
+api_keys = set(zip(merged_agg["sid"], merged_agg["iso3"]))
+dropped = merged_old[
+    ~merged_old.apply(lambda r: (r["sid"], r["iso3"]) in api_keys, axis=1)
+].copy()
+
+if len(dropped) > 0:
+    (
+        GT(
+            dropped[["Country", "iso3", "sid", "storm_name", "allocation_year", "total_usd"]]
+            .sort_values("allocation_year")
+            .reset_index(drop=True)
+            .rename(columns={"total_usd": "Amount (USD)", "allocation_year": "Year", "storm_name": "Storm"})
+        )
+        .tab_header(
+            title=f"{len(dropped)} Dropped Storm-Country Pairs",
+            subtitle="In old CSV pipeline but not in API pipeline",
+        )
+        .fmt_currency("Amount (USD)", currency="USD", decimals=0)
+    )
+else:
+    print("No pairs were dropped — the API pipeline is a strict superset.")
 ```

@@ -4,8 +4,9 @@ jupyter: ds-storm-impact
 ---
 
 This chapter assesses the statistical relationship between cyclone population
-exposure and CERF allocation amounts using the merged dataset constructed in
-the previous chapter.
+exposure and CERF allocation amounts. Data is sourced from the **CERF GMS API**
+with a curated `ApplicationCode -> IBTrACS sid` mapping (see @sec-pipeline-comparison
+for comparison with the old CSV pipeline).
 
 ```{python}
 #| label: setup
@@ -27,21 +28,32 @@ warnings.filterwarnings("ignore", module="plotnine")
 load_dotenv()
 
 from src.datasets.cerf import (
-    build_analysis_dataset,
+    build_analysis_dataset_api,
     remove_col_outliers_iqr,
-    DEFAULT_MANUAL_OVERRIDES,
 )
 
-df_cerf = stratus.load_csv_from_blob(
-    "ds-storm-impact-harmonisation/processed/cerf-storms-with-sids-2024-02-27.csv"
-)
 df_ocha = stratus.load_parquet_from_blob(
     "ds-storm-impact-harmonisation/processed/adm0_ibtracs_exp_all.parquet"
 )
 
-merged_agg = build_analysis_dataset(
-    df_cerf, df_ocha, manual_overrides=DEFAULT_MANUAL_OVERRIDES
-)
+merged_agg = build_analysis_dataset_api(df_ocha)
+
+# Storm name lookup
+engine = stratus.get_engine("prod")
+all_sids = sorted(merged_agg["sid"].unique())
+with engine.connect() as conn:
+    _sid_names = pd.read_sql(
+        f"SELECT sid, name FROM storms.ibtracs_storms "
+        f"WHERE sid IN ({','.join(repr(s) for s in all_sids)})",
+        conn,
+    )
+sid_name_map = dict(zip(_sid_names["sid"], _sid_names["name"]))
+merged_agg["storm_name"] = merged_agg["sid"].map(sid_name_map)
+
+print(f"Storm-country pairs: {len(merged_agg)}")
+print(f"Unique storms: {merged_agg['sid'].nunique()}")
+print(f"Year range: {int(merged_agg['allocation_year'].min())}–{int(merged_agg['allocation_year'].max())}")
+print(f"Total CERF: ${merged_agg['total_usd'].sum():,.0f}")
 ```
 
 ## Distribution Assessment
@@ -162,8 +174,9 @@ for col, label in [
     _, col_outliers = remove_col_outliers_iqr(merged_agg, col)
     print(f"  {label}: {len(col_outliers)} outlier(s)")
     for _, row in col_outliers.iterrows():
+        storm = sid_name_map.get(row.get("sid", ""), "Unknown")
         print(
-            f"    → {row['Country']} ({row['iso3']}): "
+            f"    → {row['Country']} ({row['iso3']}, {storm}): "
             f"{col}={row[col]:,.0f}, CERF=${row['total_usd']:,.0f}"
         )
 ```
@@ -237,7 +250,6 @@ addition to the distribution-free **Spearman rank correlation**.
 ```{python}
 #| label: prepare-subsets
 #| output: false
-merged_orig = merged_agg[merged_agg["sid_source"] == "original"].copy()
 merged_all = merged_agg.copy()
 merged_2016 = merged_agg[merged_agg["allocation_year"] >= 2016].copy()
 
@@ -255,7 +267,7 @@ def build_scatter_df(data):
         sub = data.dropna(subset=[col])
         sub = sub[(sub[col] > 0) & (sub["total_usd"] > 0)]
         _, outliers = remove_col_outliers_iqr(data, col)
-        frame = sub[["Country", "total_usd", "sid_source"]].copy()
+        frame = sub[["Country", "total_usd"]].copy()
         frame["threshold"] = label
         frame["pop_exposed"] = sub[col]
         frame["is_outlier"] = frame.index.isin(outliers.index)
@@ -292,16 +304,16 @@ def build_annot_df(data):
 
 ::: {.panel-tabset}
 
-## Original Coverage
+## All Data
 
-Analysis using only CERF rows with **original storm IDs** (no auto/manual
-matching applied). Red circles mark per-column IQR outliers.
+Analysis using all CERF storm allocations matched via the curated
+`ApplicationCode -> sid` dictionary. Red circles mark per-column IQR outliers.
 
 ```{python}
-#| label: scatter-orig-log
-#| fig-cap: "Original coverage: log-log scatter with OLS regression and 95% CI. Red circles mark outliers (per-column IQR on log scale)."
-plot_df = build_scatter_df(merged_orig)
-annot_df = build_annot_df(merged_orig)
+#| label: scatter-all
+#| fig-cap: "All matched allocations: log-log scatter with OLS regression and 95% CI. Red circles mark outliers (per-column IQR on log scale)."
+plot_df = build_scatter_df(merged_all)
+annot_df = build_annot_df(merged_all)
 outlier_df = plot_df[plot_df["is_outlier"]]
 
 p = (
@@ -326,7 +338,7 @@ p = (
     + labs(
         x="Population Exposed",
         y="CERF Allocation (USD)",
-        title="Original Coverage — Log Scale with OLS",
+        title="All Data — Log Scale with OLS",
     )
     + theme_minimal()
     + theme(figure_size=(16, 5))
@@ -335,105 +347,7 @@ p
 ```
 
 ```{python}
-#| label: corr-orig
-corr_rows_orig = []
-for col, label in exp_meta:
-    full = merged_orig.dropna(subset=[col])
-    full = full[(full[col] > 0) & (full["total_usd"] > 0)]
-    clean, _ = remove_col_outliers_iqr(merged_orig, col)
-
-    for dset_label, subset in [("All data", full), ("Outliers removed", clean)]:
-        if len(subset) < 3:
-            continue
-        r_log, p_log = sp_stats.pearsonr(
-            np.log10(subset[col]), np.log10(subset["total_usd"])
-        )
-        rho, p_rho = sp_stats.spearmanr(subset[col], subset["total_usd"])
-        corr_rows_orig.append({
-            "Threshold": label,
-            "Dataset": dset_label,
-            "n": len(subset),
-            "r² (log)": f"{r_log**2:.3f}",
-            "p (Pearson)": f"{p_log:.4f}",
-            "Spearman rho": f"{rho:.3f}",
-            "p (Spear.)": f"{p_rho:.4f}",
-        })
-corr_orig_df = pd.DataFrame(corr_rows_orig)
-
-gt_orig = (
-    GT(corr_orig_df)
-    .tab_header(
-        title="Correlation — Original Coverage",
-        subtitle="r² (log) matches scatter plot annotations; both full and cleaned data shown",
-    )
-    .tab_spanner(label="Pearson (log₁₀)", columns=["r² (log)", "p (Pearson)"])
-    .tab_spanner(label="Spearman (rank)", columns=["Spearman rho", "p (Spear.)"])
-)
-
-clean_idx = corr_orig_df.index[
-    corr_orig_df["Dataset"] == "Outliers removed"
-].tolist()
-if clean_idx:
-    gt_orig = gt_orig.tab_style(
-        style=style.fill(color="#f0f7f0"),
-        locations=loc.body(rows=clean_idx),
-    )
-
-gt_orig.tab_source_note(
-    "r² = Pearson r squared on log₁₀ values (same statistic shown in scatter plots). "
-    "Green rows = per-column IQR outliers removed."
-)
-```
-
-## Improved Coverage
-
-Analysis using **all matched CERF rows** (original + auto + manual).
-Points coloured by match source. Red circles mark per-column outliers.
-
-```{python}
-#| label: scatter-improved-log
-#| fig-cap: "Improved coverage: log-log scatter coloured by sid source. Red circles mark outliers (per-column IQR on log scale)."
-plot_df = build_scatter_df(merged_all)
-annot_df = build_annot_df(merged_all)
-outlier_df = plot_df[plot_df["is_outlier"]]
-
-source_colors = {"original": "#4292c6", "manual": "#fd8d3c", "auto": "#74c476"}
-
-p = (
-    ggplot(plot_df, aes("pop_exposed", "total_usd"))
-    + geom_point(aes(color="sid_source"), size=3, alpha=0.7)
-    + (
-        geom_point(
-            data=outlier_df,
-            color="red", size=5, stroke=1.5, shape="o", fill="none",
-        )
-        if len(outlier_df) > 0
-        else geom_blank()
-    )
-    + geom_smooth(method="lm", se=True, color="red", fill="red", alpha=0.15)
-    + geom_label(
-        data=annot_df, mapping=aes(label="label"),
-        color="black",
-        ha="left", va="top", size=8, fill="white", alpha=0.8,
-    )
-    + scale_color_manual(values=source_colors)
-    + scale_x_log10()
-    + scale_y_log10()
-    + facet_wrap("~threshold", scales="free")
-    + labs(
-        x="Population Exposed",
-        y="CERF Allocation (USD)",
-        color="Source",
-        title="Improved Coverage — Log Scale with OLS",
-    )
-    + theme_minimal()
-    + theme(figure_size=(16, 5))
-)
-p
-```
-
-```{python}
-#| label: corr-improved
+#| label: corr-all
 corr_rows_all = []
 for col, label in exp_meta:
     full = merged_all.dropna(subset=[col])
@@ -462,7 +376,7 @@ corr_all_df = pd.DataFrame(corr_rows_all)
 gt_all = (
     GT(corr_all_df)
     .tab_header(
-        title="Correlation — Improved Coverage",
+        title="Correlation — All Data (CERF API)",
         subtitle="r² (log) matches scatter plot annotations; both full and cleaned data shown",
     )
     .tab_spanner(label="Pearson (log₁₀)", columns=["r² (log)", "p (Pearson)"])
@@ -493,16 +407,14 @@ process and improved exposure data quality for recent storms.
 
 ```{python}
 #| label: scatter-2016
-#| fig-cap: "2016+ allocations only: log-log scatter coloured by sid source. Correlations are markedly stronger than the full time series."
+#| fig-cap: "2016+ allocations only: log-log scatter. Correlations are markedly stronger than the full time series."
 plot_df = build_scatter_df(merged_2016)
 annot_df = build_annot_df(merged_2016)
 outlier_df = plot_df[plot_df["is_outlier"]]
 
-source_colors = {"original": "#4292c6", "manual": "#fd8d3c", "auto": "#74c476"}
-
 p = (
     ggplot(plot_df, aes("pop_exposed", "total_usd"))
-    + geom_point(aes(color="sid_source"), size=3, alpha=0.7)
+    + geom_point(color="#4292c6", size=3, alpha=0.6)
     + (
         geom_point(
             data=outlier_df,
@@ -514,17 +426,14 @@ p = (
     + geom_smooth(method="lm", se=True, color="red", fill="red", alpha=0.15)
     + geom_label(
         data=annot_df, mapping=aes(label="label"),
-        color="black",
         ha="left", va="top", size=8, fill="white", alpha=0.8,
     )
-    + scale_color_manual(values=source_colors)
     + scale_x_log10()
     + scale_y_log10()
     + facet_wrap("~threshold", scales="free")
     + labs(
         x="Population Exposed",
         y="CERF Allocation (USD)",
-        color="Source",
         title="2016+ Allocations — Log Scale with OLS",
     )
     + theme_minimal()
@@ -601,34 +510,27 @@ This analysis is restricted to the 2016+ period where CIRV data is available.
 #| label: cirv-setup
 #| output: false
 import statsmodels.api as sm
-from src.datasets.cerf import load_3rm_cirv
+from src.datasets.cerf import load_3rm_cirv, load_cerf_api_data, apply_cerfcode_sids
 
-# Load CIRV from blob (3RM dataset v1.8) and join via iso3 + year
-# (this chapter uses the old CSV pipeline which lacks ApplicationCode)
+# Load CIRV from blob (3RM dataset) and join via ApplicationCode
 df_3rm = load_3rm_cirv()
-cirv_lookup = df_3rm[["Country", "Year", "CIRV"]].drop_duplicates()
+cirv_map = dict(zip(df_3rm["ApplicationCode"], df_3rm["CIRV"]))
 
-# Map 3RM country names to iso3 for joining
-from src.datasets.cerf import ISO2_TO_ISO3
-_name_to_iso3 = {
-    "Cuba": "CUB", "Grenada": "GRD", "Jamaica": "JAM", "Myanmar": "MMR",
-    "Mozambique": "MOZ", "Philippines": "PHL", "Vanuatu": "VUT",
-    "Bangladesh": "BGD", "Malawi": "MWI", "Madagascar": "MDG",
-    "Fiji": "FJI", "Nicaragua": "NIC", "Guatemala": "GTM",
-    "Honduras": "HND", "El Salvador": "SLV", "Pakistan": "PAK",
-    "Democratic People's Republic of Korea": "PRK",
-    "Bahamas": "BHS", "Comoros": "COM", "Zimbabwe": "ZWE",
-    "Djibouti": "DJI", "Viet Nam": "VNM", "Dominica": "DMA",
-    "Antigua and Barbuda": "ATG", "Haiti": "HTI",
-}
-cirv_lookup["iso3"] = cirv_lookup["Country"].map(_name_to_iso3)
-cirv_lookup = cirv_lookup.dropna(subset=["iso3"])
+# Get ApplicationCode -> (sid, iso3) from our pipeline to bridge the join
+df_api_raw = load_cerf_api_data()
+df_api_matched = apply_cerfcode_sids(df_api_raw)
+df_api_matched["CIRV"] = df_api_matched["ApplicationCode"].map(cirv_map)
 
-merged_cirv = merged_agg.merge(
-    cirv_lookup[["iso3", "Year", "CIRV"]].rename(columns={"Year": "allocation_year"}),
-    on=["iso3", "allocation_year"],
-    how="left",
+# Build sid+iso3 -> CIRV lookup (CIRV is constant per country-year,
+# so taking first value per group is safe)
+cirv_by_pair = (
+    df_api_matched.dropna(subset=["sid", "CIRV"])
+    .groupby(["sid", "iso3"])["CIRV"]
+    .first()
+    .reset_index()
 )
+
+merged_cirv = merged_agg.merge(cirv_by_pair, on=["sid", "iso3"], how="left")
 print(f"CIRV coverage: {merged_cirv['CIRV'].notna().sum()} of {len(merged_cirv)} rows")
 
 # Filter to rows with CIRV available and positive allocation
@@ -818,32 +720,20 @@ partially substitute for CIRV in storm-type allocations.
 
 ## Key Findings
 
-1. **Improved coverage**: After auto/manual sid matching, we recover additional
-   CERF rows with storm IDs, adding key storms like MOCHA, FREDDY, GOMBE,
-   and EMNATI.
-
-2. **FREDDY gap**: Cyclone FREDDY (2023) is missing from the OCHA exposure
-   dataset entirely, so Malawi and some Mozambique/Madagascar allocations
-   can't get exposure values even with the correct sid.
-
-3. **Remaining unmatched**: ~7 rows are likely non-tropical-cyclone flooding
-   events (Ghana, Mali, Sudan, Rwanda, Uganda, Bolivia, Colombia, Zimbabwe)
-   that won't have IBTrACS matches.
-
-4. **Outlier handling**: Outliers identified per wind speed column independently
-   (IQR × 2 on log₁₀ scale). Removing a column's outliers makes its
-   log distribution pass Shapiro-Wilk, validating Pearson r on that scale.
-   Both "all data" and "outliers removed" statistics are shown for comparison.
-
-5. **Strongest signal at 64 kt**: Population exposed to ≥ 64 kt winds shows
+1. **Strongest signal at 64 kt**: Population exposed to >= 64 kt winds shows
    the strongest correlation with CERF allocation amounts.
 
-6. **Much stronger signal from 2016 onward**: Restricting to the 3RM period
-   (2016+) roughly doubles the explained variance across all thresholds
-   (e.g. Spearman rho = 0.70 at 64 kt vs 0.47 over all years). This
-   likely reflects the evolution of CERF's allocation process and improved
-   data quality for recent storms.
+2. **Stronger signal from 2016 onward**: Restricting to the 3RM period
+   (2016+) strengthens correlations across all thresholds.
 
-7. **High variance**: Substantial scatter — allocation amounts depend on many
+3. **Outlier removal matters**: Removing per-column IQR outliers substantially
+   improves exposure's predictive power and restores log-normality.
+
+4. **CIRV adds little for storms**: Hazard-specific exposure captures more
+   allocation-relevant information than the generic vulnerability index.
+   Exposure could complement or partially substitute for CIRV in
+   storm-type allocations.
+
+5. **High variance**: Substantial scatter — allocation amounts depend on many
    factors beyond wind exposure (political context, absorptive capacity,
    concurrent crises, flooding vs wind damage).
