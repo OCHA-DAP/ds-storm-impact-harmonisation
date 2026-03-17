@@ -1323,10 +1323,42 @@ for col, label in exp_meta:
 )
 ```
 
-Average annual RR across all emergency types is a strong predictor on its
-own (Adj R² ~ 0.3, p < 0.001), outperforming CIRV as a vulnerability
-proxy. When combined with 64 kt exposure, the model reaches Adj R² ~ 0.55,
-the highest we have observed for predicting TC allocation amounts from
-pre-disaster variables. However, the data leakage caveat applies: each
-country's TC allocations contribute to its own average, inflating the
-apparent predictive power.
+Average annual RR across all emergency types is a strong, significant
+predictor on its own, outperforming both CIRV and wind-speed exposure as
+a standalone predictor of TC allocation amounts across all thresholds
+(see table above). However, the data
+leakage caveat applies: each country's TC allocations contribute to its
+own average, inflating the apparent predictive power. Note that the average
+is computed as a single country-level value (mean annual RR across all
+years and emergency types), not joined per-year, so every TC allocation
+for a given country receives the same predictor value.
+
+### Note: Cyclone-Specific Vulnerability Indices
+
+We explored whether an external cyclone-specific vulnerability index could
+serve as a better country-level predictor than CIRV. No ready-to-use,
+cyclone-specific socioeconomic vulnerability index exists at the country
+level. The closest options are:
+
+- **INFORM Risk Index**: What CIRV is derived from. Already tested in this
+  analysis; not significant for TC allocations.
+- **Basnayake et al. (2026) Coastal Vulnerability Index**: A global
+  assessment of coastal vulnerability to erosion and flooding
+  (doi:10.1038/s41467-025-67275-6). Purely geophysical (coastal slope,
+  geomorphology, tidal range, wave height, sea level change, shoreline
+  change). No socioeconomic component, so unlikely to predict allocation
+  decisions.
+- **TCE-DAT**: Global tropical cyclone exposure dataset (1950--2015) with
+  population and GDP exposed to wind thresholds. Similar to the OCHA
+  exposure data we already use, but adds an asset/GDP dimension.
+- **CLIMADA**: Open-source risk modeling platform that could produce
+  country-level TC risk estimates, but requires running the model rather
+  than providing a precomputed index.
+- **ND-GAIN**: Climate adaptation vulnerability index. Country level, 192
+  countries. Not cyclone-specific but more climate-focused than INFORM.
+
+The finding that CERF's own historical RR spending outperforms all
+external indices as a vulnerability proxy suggests that the factors driving
+allocation decisions (crisis frequency, government capacity, CERF
+relationship) are better captured by revealed spending patterns than by
+any single external index.
