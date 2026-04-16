@@ -17,6 +17,7 @@ book:
     - 02b-analysis-cerf-api.qmd
     - 02c-analysis-inform.qmd
     - 03-gdacs-realtime.qmd
+    - 04-nhc-wsp-exploration.qmd
     - part: "Appendices"
       chapters:
         - 01-data-merge.qmd

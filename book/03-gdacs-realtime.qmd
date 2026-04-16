@@ -327,14 +327,23 @@ To fill the 2016--2021 gap where the GDACS impact endpoint returns
 zeros, we reconstructed cumulative exposure from the timeline wind
 radii + a population raster. Two methodological choices matter:
 
-### Wind radii polygon interpolation
+### Wind radii polygon construction
 
 TC advisories report wind radii as the maximum extent in each quadrant
-(NE, SE, SW, NW) in nautical miles. The naive approach assigns a
-constant radius within each quadrant, producing sharp kinks at the
-quadrant boundaries (0/90/180/270 degrees). We instead use **cosine
-interpolation** between adjacent quadrant center azimuths (45, 135, 225,
-315 degrees), producing smooth, physically realistic wind field shapes.
+(NE, SE, SW, NW) in nautical miles. Our `wind_radii_polygon()` function
+supports two methods via a `method` parameter:
+
+- **`"asymmetric"`** (default): cosine-interpolated between quadrant
+  center azimuths (45, 135, 225, 315 degrees), producing smooth,
+  physically realistic shapes that preserve the true wind field
+  asymmetry.
+
+- **`"symmetric"`**: takes `max(NE, SE, SW, NW)` and builds a uniform
+  circle. This replicates the GDACS/JRC methodology: the 2026 GDACS
+  guide and earlier JRC documentation confirm that although bulletins
+  list four quadrant radii, GDACS uses only the maximum value in all
+  directions, overstating the affected area relative to the true
+  asymmetric field.
 
 ### Track corridor filling
 
@@ -344,38 +353,54 @@ was present but no polygon exists. We fill these gaps by taking the
 **convex hull of each adjacent pair** of wind polygons, creating a
 smooth swath along the track.
 
-### Validation results
+### Validation: symmetric vs asymmetric
 
-Using WorldPop 2026 (1km) as the population grid:
+Using WorldPop 2026 (1km), tested against the GDACS impact endpoint for
+two recent storms and one 2016 storm where the impact endpoint returns
+zeros (demonstrating gap-filling):
 
-| Storm | Buffer | GDACS Impact | Reconstructed | Ratio |
+| Storm | Buffer | GDACS Impact | Asymmetric | Symmetric |
 |---|---|---|---|---|
-| MILTON-24 | 34kt | 24,981,254 | 27,042,590 | 108% |
-| MILTON-24 | 64kt | 4,626,382 | 5,004,538 | 108% |
-| KALMAEGI-25 | 34kt | 39,026,559 | 33,712,940 | 86% |
-| KALMAEGI-25 | 64kt | 12,213,417 | 9,353,195 | 77% |
+| KALMAEGI-25 | 34kt | 39.0M | 33.7M (86%) | 37.3M (96%) |
+| KALMAEGI-25 | 64kt | 12.2M | 9.4M (77%) | 11.7M (96%) |
+| MILTON-24 | 34kt | 25.0M | 27.0M (108%) | 30.6M (122%) |
+| MILTON-24 | 64kt | 4.6M | 5.0M (108%) | 6.1M (133%) |
+| MATTHEW-16 | 34kt | **0 (gap)** | **36.0M** | **72.8M** |
+| MATTHEW-16 | 64kt | **0 (gap)** | **3.7M** | **7.9M** |
 
-The KALMAEGI undercount is partially explained by a quirk in the GDACS
-impact endpoint: 16 of 30 admin units show `pop_affected` exceeding the
-admin's actual population (by up to 4x), suggesting GDACS uses a
-different population attribution method than a strict raster
-intersection. Our raster-based approach is methodologically cleaner but
-will produce lower totals for multi-country storms where GDACS inflates
-admin-level counts.
+**Key findings:**
+
+- The **symmetric method matches GDACS within 4%** for multi-country
+  storms (KALMAEGI), confirming the JRC symmetric-circle methodology.
+- The symmetric method **overshoots for MILTON** (122--133%) because
+  MILTON's radii were already fairly symmetric, and GDACS may clip to
+  coastlines or apply other adjustments we don't replicate.
+- **MATTHEW-16 gap-fill works**: the impact endpoint returns zeros for
+  this 2016 storm, but we reconstruct 36M (asymmetric) or 73M
+  (symmetric) exposed at 34kt. The large difference between methods
+  reflects MATTHEW's highly asymmetric wind field.
+- The asymmetric method is more physically realistic and avoids
+  overstating exposure. For operational use, it may be preferable
+  to the GDACS approach.
+- Remaining discrepancies are partly explained by GDACS attributing
+  population at the admin-unit level rather than grid-cell level:
+  16 of 30 admin units for KALMAEGI show `pop_affected` exceeding
+  the admin's actual population by up to 4x.
 
 ## GDACS Methodology Summary
 
-Based on the JRC technical report and our reconstruction testing:
+Based on the JRC technical report (Probst & Annunziato, 2016,
+EUR 28331 EN, doi:10.2788/504291), the 2026 GDACS API guide, and our
+reconstruction testing:
 
 - **Data sources**: NOAA bulletins (Atlantic, E/C Pacific) and JTWC
   bulletins (W Pacific, Indian Ocean, S Hemisphere), ingested every
   30 minutes
-- **Wind impact**: advisory wind radii (34/50/64 kt per quadrant)
+- **Wind impact**: advisory wind radii (34/50/64 kt); GDACS uses the
+  **maximum** of the four quadrant radii as a symmetric circle,
   overlaid on a GHSL population grid
 - **Storm surge**: wind radii + Holland's parametric model + HyFlux2
 - **Rainfall**: NASA GPM (previously NOAA eTRaP)
-- **Reference**: Probst P. and Annunziato A., *Tropical Cyclones in
-  GDACS: Data sources*, EUR 28331 EN, 2016. doi:10.2788/504291
 
 ## IBTrACS Matching
 
