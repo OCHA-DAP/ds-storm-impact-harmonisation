@@ -5,44 +5,48 @@ title: "Introduction"
 ::: {.callout-tip appearance="simple"}
 ## Executive Summary
 
-CERF rapid-response allocations for tropical cyclones show a statistically
-significant but modest relationship with national population exposure to
-high winds. The strongest signal comes from hurricane-force winds
-(64+ kt), and the relationship strengthens markedly when restricted to
-allocations from 2016 onward (Spearman rho = 0.70). However, exposure alone
-explains only a fraction of allocation variation. Political context, concurrent crises, operational capacity,
-and funding availability all play major roles in allocation decisions.
-These findings suggest cyclone exposure has value as one input among
-several for predicting humanitarian funding needs, rather than as a
-standalone predictor.
+The INFORM Risk and INFORM Severity indices are viable replacements for
+CIRV in the 3RM regression model. INFORM Risk alone matches CIRV's
+performance (Adj R^2^ = 0.709 vs 0.707) with full temporal coverage and the
+advantage of being a transparent, publicly available index. Using both
+Risk and Severity together yields the best fit (Adj R^2^ = 0.729), though
+Severity is limited to 2019+. These findings hold across all emergency
+types (n = 422 allocations).
+
+On cyclone exposure specifically: population exposed to hurricane-force
+winds (64+ kt) shows a significant bivariate relationship with CERF
+allocation amounts from 2016 onward (Spearman rho = 0.70; R^2^ up to
+0.43 on the log scale after outlier removal). However, even at its
+strongest, exposure explains under half the variance in allocations,
+limiting its standalone operational utility. Adding exposure to the
+3RM modestly improves Adj R^2^ for TC allocations: from 0.554 to 0.647
+without people targeted, and from 0.813 to 0.879 with people targeted
+(both at 64 kt). Exposure coefficients do not reach significance at
+these sample sizes (n = 29--40).
 :::
 
 ::: {.callout-note appearance="simple"}
 ## Technical Summary
 
-We assess whether national population exposure estimates from OCHA's cyclone
-hazard model can predict CERF rapid-response allocation amounts for tropical
-cyclones. Merging 82 CERF storm allocations (2006--2023) with exposure data
-at three wind speed thresholds (34, 50, 64 kt) yields 59 storm-country
-pairs for analysis. On the log scale, population exposed to hurricane-force
-winds (≥ 64 kt) shows the strongest association with allocation size
-(Spearman rho = 0.47, p = 0.002; Pearson r^2^ = 0.15 on log-transformed
-values). Tropical-storm-force exposure (≥ 34 kt) is also significant
-(rho = 0.32, p = 0.01) but explains less variance. Restricting to
-allocations from 2016 onward --- aligning with the period used in the
-CERF 3RM regression model (Rost, 2025) --- substantially strengthens
-the signal (rho = 0.70 at 64 kt; r^2^ = 0.43 on log scale after outlier
-removal). Overall, exposure is a statistically significant predictor
-of allocation amounts, modest over the full time series but notably
-stronger in the modern period. Considerable scatter remains, reflecting
-the role of non-exposure factors in allocation decisions.
+**Phase 1 (TC exposure):** Population exposed to hurricane-force winds
+(64+ kt) shows the strongest bivariate association with CERF allocation
+size (Spearman rho = 0.70, R^2^ = 0.43 on log scale after outlier
+removal, 2016+). Variance explained remains modest, limiting standalone
+operational utility. Adding exposure to the 3RM modestly increases
+Adj R^2^ for storm allocations at 64 kt (0.554 to 0.647 without people
+targeted; 0.813 to 0.879 with), but exposure coefficients do not reach
+significance at small n (29--40). Early exploration of
+[GDACS and ADAM exposure datasets](#sec-gdacs-completeness) revealed
+significant temporal gaps that precluded their use; all TC analysis
+relies on the OCHA in-house exposure estimates.
 
-**Technical note:** Both allocation amounts and exposure values are heavily
-right-skewed. Log transformation yields approximately normal distributions
-after removal of a small number of extreme low-exposure outliers (identified
-via IQR on the log scale), validating Pearson correlation on the log scale
-as the primary measure. Spearman rank correlation is reported alongside as
-a distribution-free robustness check.
+**Phase 2 (INFORM update):** Replacing CIRV with INFORM Risk produces
+nearly identical fit on the full 3RM dataset (Adj R^2^ = 0.709 vs 0.707,
+n = 422). On the subset with INFORM Severity coverage (n = 237, 2019+),
+both indices individually outperform CIRV (Adj R^2^ = 0.724 vs 0.717),
+and using both together yields the best specification (Adj R^2^ = 0.729).
+Decomposing either index into individual pillars does not improve on
+the composite scores.
 :::
 
 ## Background
@@ -55,18 +59,19 @@ including the scale and severity of needs, total funding required, the
 country's pre-existing humanitarian situation, and the number of people
 targeted.
 
-Rost (2025) formalised this process with a simple regression model (3RM)
-that uses four explanatory variables --- emergency type, the CERF Index
-for Risk and Vulnerability (CIRV), total funding required (log), and
-number of people targeted (log) --- to explain CERF allocation amounts.
-The model achieves an adjusted R^2^ of 0.71 across 378 rapid-response
-allocations (2016--2024), confirming that CERF allocations are broadly
-consistent with these factors. Notably, the 3RM contains no
-hazard-specific variables: a cyclone allocation and a flood allocation
-of similar scale are treated identically. This raises the question of
-whether adding hazard-specific information --- such as population
-exposure to tropical cyclone winds --- could improve predictions for
-storm events specifically.
+[Rost (2025)](https://zenodo.org/records/15164535) formalised this process
+with a simple regression model (3RM) that uses four explanatory variables
+--- emergency type, the CERF Index for Risk and Vulnerability
+([CIRV](https://doi.org/10.1186/s41018-025-00184-x)), total funding
+required (log), and number of people targeted (log) --- to explain CERF
+allocation amounts. The model achieves an adjusted R^2^ of 0.71 across
+378 rapid-response allocations (2016--2024), confirming that CERF
+allocations are broadly consistent with these factors. CIRV is a
+CERF-internal composite index built from INFORM Risk, INFORM Severity,
+and a multi-indicator component. This analysis examines two questions:
+whether adding hazard-specific information (cyclone population exposure)
+can improve the 3RM for storm events, and whether the publicly available
+INFORM indices can replace CIRV directly.
 
 This analysis builds on two parallel streams of work within OCHA's Centre for Humanitarian Data (CHD) Data Science team. First, a pipeline to estimate national
 population exposure to tropical cyclone wind speeds using IBTrACS storm
@@ -78,13 +83,18 @@ gaps that limited their usefulness (see @sec-gdacs-completeness);
 the OCHA exposure dataset, covering 2001--2026 with over 1,200 storms,
 proved far more suitable for this analysis.
 
-## Research Question
+## Research Questions
 
-**Can national population exposure estimates from cyclone wind field models
-predict the size of CERF rapid-response allocations for tropical cyclone
-events?** And if exposure alone is insufficient as a standalone predictor,
-does it carry enough signal to improve existing models like 3RM for
-storm-type emergencies?
+This analysis addresses two questions in sequence:
+
+**Phase 1 -- TC Windspeed Exposure:** Can national population exposure
+estimates from cyclone wind field models predict CERF allocation amounts
+for tropical cyclone events? Does adding exposure to the 3RM improve its
+fit for storms?
+
+**Phase 2 -- INFORM Update:** Can the publicly available INFORM Risk and
+INFORM Severity indices replace CIRV in the 3RM, maintaining or improving
+model performance with a more transparent, reproducible specification?
 
 ## Data Sources
 
@@ -97,26 +107,17 @@ storm-type emergencies?
 
 ## Book Structure
 
-- **Data & Merge** --- Overview of the CERF allocation and OCHA exposure
-  datasets, storm ID matching process, and construction of the merged
-  analysis dataset.
-- **Analysis** --- Statistical assessment of the exposure--allocation
-  relationship: distributions, outlier handling, scatter plots, and
-  correlation analysis.
-- **Technical Appendix** --- Exploration of the ADAM and GDACS exposure
-  datasets, which were ultimately unusable due to temporal gaps but are
-  documented here for completeness.
+- **TC Windspeed & 3RM Replication** (Phase 1) --- Bivariate analysis of
+  cyclone exposure vs CERF allocations, prediction of 3RM outcome
+  variables, and testing whether exposure improves the 3RM for storms.
+- **3RM -- INFORM Update** (Phase 2) --- Replacing CIRV with INFORM Risk
+  and Severity indices; methodology background, data pipeline, and
+  regression comparison.
+- **Appendices** --- Data merge pipeline (storm ID matching, exposure
+  joining) and exploration of ADAM/GDACS datasets.
 
 ## Next Steps
 
-- **Predict additional outcomes**: Extend beyond CERF allocation amounts
-  to flash appeal data --- people in need, number targeted, total
-  requested --- which may be more directly related to physical exposure.
-- **Integrate with 3RM**: Add population exposure as a variable in the
-  Rost (2025) regression model for storm-type emergencies, testing
-  whether it improves the adjusted R^2^ beyond the current 0.71.
-- **Fill data gaps**: Process Cyclone FREDDY through the exposure pipeline
-  and backfill the GDACS 2016--2021 gap to expand the usable dataset.
 - **Sub-national analysis**: Move from national (ADM0) to sub-national
   (ADM1/ADM2) exposure, which may better capture localised damage
   patterns.

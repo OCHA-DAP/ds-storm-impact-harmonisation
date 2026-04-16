@@ -13,11 +13,13 @@ book:
     logo: logo_white.png
   chapters:
     - index.qmd
-    - 01-data-merge.qmd
     # - 02-analysis.qmd
     - 02b-analysis-cerf-api.qmd
+    - 02c-analysis-inform.qmd
+    - 03-gdacs-realtime.qmd
     - part: "Appendices"
       chapters:
+        - 01-data-merge.qmd
         - 03-appendix-adam-gdacs.qmd
 
 format:

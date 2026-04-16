@@ -8,6 +8,7 @@ dependencies = [
     "great-tables>=0.21.0",
     "matplotlib>=3.10.8",
     "ocha-stratus>=0.1.7",
+    "openpyxl>=3.1.5",
     "pandas>=3.0.1",
     "plotnine>=0.15.3",
     "python-dotenv>=1.2.2",
@@ -16,7 +17,9 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "contextily>=1.7.0",
     "jupyter>=1.1.1",
+    "plotly>=6.7.0",
     "ruff>=0.15.5",
 ]
 
