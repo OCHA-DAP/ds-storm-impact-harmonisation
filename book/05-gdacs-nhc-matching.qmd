@@ -1,0 +1,557 @@
+---
+title: "Matching GDACS to NHC A-Deck"
+jupyter: ds-storm-impact
+---
+
+This chapter documents how GDACS timeline data relates to the NHC
+A-deck data in our database, and develops a method for linking them
+via `atcf_id`.
+
+```{python}
+#| label: setup
+#| output: false
+import sys
+
+sys.path.insert(0, "..")
+
+import numpy as np
+import ocha_stratus as stratus
+import pandas as pd
+import geopandas as gpd
+import plotly.graph_objects as go
+from dotenv import load_dotenv
+
+from src.datasets.gdacs import get_active_cyclones, get_timeline
+
+load_dotenv()
+engine_prod = stratus.get_engine("prod")
+```
+
+## Two Products, One Source
+
+Both GDACS and our database ultimately derive from the same NHC
+operational forecasts, but they scrape different NHC products:
+
+| | Our Database | GDACS |
+|---|---|---|
+| **NHC product** | ATCF A-deck (OFCL) | Forecast/Advisory (TCM) |
+| **Source URL** | `ftp.nhc.noaa.gov/atcf/` | `nhc.noaa.gov` RSS feeds |
+| **Timestamp convention** | Synoptic valid time (00/06/12/18 UTC) | Advisory issue time (03/09/15/21 UTC) |
+| **Contains** | Analysis + full forecast cone | Updated current position + forecast |
+| **Storm ID** | `atcf_id` (e.g., AL142024) | `eventid` (GDACS internal) |
+
+NHC operates on a 6-hourly cycle. The formal analysis is produced at
+synoptic times (00/06/12/18 UTC). Three hours later, the advisory is
+issued (03/09/15/21 UTC) with an updated current position reflecting
+where the storm has moved in the interim. The forecast points beyond
+t=0, however, are unchanged between the two products.
+
+```{python}
+#| label: hour-comparison
+tl = get_timeline(1001111)  # MILTON-24
+actual = tl[tl["actual"].astype(str).str.lower() == "true"]
+
+with engine_prod.connect() as conn:
+    nhc = pd.read_sql("""
+        SELECT issued_time, valid_time, leadtime,
+               ST_Y(geometry) as lat, ST_X(geometry) as lon,
+               wind_speed
+        FROM storms.nhc_tracks_geo
+        WHERE atcf_id = 'AL142024'
+        ORDER BY issued_time, leadtime
+    """, conn)
+
+lt0 = nhc[nhc["leadtime"] == 0]
+gdacs_hrs = sorted(actual["advisory_datetime"].dt.hour.unique())
+nhc_hrs = sorted(lt0["issued_time"].dt.hour.unique())
+
+print(f"GDACS advisory hours (UTC): {gdacs_hrs}")
+print(f"A-deck synoptic hours (UTC): {nhc_hrs}")
+```
+
+## NOAA Analysis Cycle
+
+To understand the relationship between these products, we examine a
+single analysis cycle using Hurricane MELISSA on October 25, 2025.
+We pull from three independent sources:
+
+- **A-deck** (from our prod DB): synoptic analysis at 12Z and 18Z
+- **TCM Advisory 17** (from blob CSV scraped by `ds-nhc-forecast`):
+  full forecast issued at 15Z
+- **TCP Advisory 17A** (from NHC archive directly): intermediate
+  public advisory at 18Z, position update only
+
+```{python}
+#| label: analysis-cycle-data
+#| output: false
+import requests
+from bs4 import BeautifulSoup
+
+engine_prod = stratus.get_engine("prod")
+
+# 1. A-deck from DB (12Z and 18Z issuances)
+with engine_prod.connect() as conn:
+    adeck_melissa = pd.read_sql("""
+        SELECT issued_time, valid_time, leadtime,
+               ST_Y(geometry) as lat, ST_X(geometry) as lon,
+               wind_speed
+        FROM storms.nhc_tracks_geo
+        WHERE atcf_id = 'AL132025'
+        AND issued_time BETWEEN '2025-10-25 00:00' AND '2025-10-26 00:00'
+        ORDER BY issued_time, leadtime
+    """, conn)
+
+adeck_12z = adeck_melissa[
+    adeck_melissa["issued_time"] == "2025-10-25 12:00:00"
+].sort_values("leadtime")
+adeck_18z = adeck_melissa[
+    adeck_melissa["issued_time"] == "2025-10-25 18:00:00"
+].sort_values("leadtime")
+
+# 2. TCM Advisory 17 from blob (15Z issuance, captured in 18Z snapshot)
+tcm_snap = stratus.load_csv_from_blob(
+    "noaa/nhc/previous/20251025_180427/forecasted_tracks.csv",
+    container_name="global", stage="dev", sep=";",
+)
+tcm_adv17 = tcm_snap[
+    (tcm_snap["id"] == "al132025")
+    & (tcm_snap["issuance"] == "2025-10-25T15:00:00.000Z")
+].sort_values("validTime")
+
+# TCM observed track for t=0 position
+tcm_obs = stratus.load_csv_from_blob(
+    "noaa/nhc/previous/20251025_210339/observed_tracks.csv",
+    container_name="global", stage="dev", sep=";",
+)
+tcm_t0 = tcm_obs[
+    (tcm_obs["id"] == "al132025")
+    & (tcm_obs["lastUpdate"] == "2025-10-25T15:00:00.000Z")
+]
+
+# 3. TCP Advisory 17A directly from NHC archive
+tcp_response = requests.get(
+    "https://www.nhc.noaa.gov/archive/2025/al13/"
+    "al132025.public_a.017.shtml",
+    timeout=15,
+)
+tcp_soup = BeautifulSoup(tcp_response.content, "html.parser")
+tcp_text = tcp_soup.find("pre").get_text()
+
+# Parse position from TCP text
+for line in tcp_text.split("\n"):
+    if "LOCATION" in line and "N" in line and "W" in line:
+        parts = line.strip().split("...")
+        coords = parts[1].strip()
+        lat_str, lon_str = coords.split()
+        tcp_17a_lat = float(lat_str.replace("N", ""))
+        tcp_17a_lon = -float(lon_str.replace("W", ""))
+    if "MAXIMUM SUSTAINED" in line:
+        tcp_17a_wind = line.split("...")[-1].strip()
+```
+
+The intermediate advisory (TCP 17A) contains only the current
+position, intensity, and narrative -- no forecast coordinates:
+
+```{python}
+#| label: tcp-17a-text
+# Show the summary section of the TCP 17A text
+summary_start = tcp_text.find("SUMMARY")
+discussion_start = tcp_text.find("DISCUSSION")
+print(tcp_text[summary_start:discussion_start].strip())
+```
+
+The NHC analysis cycle for MELISSA Advisory 17 proceeds as follows:
+
+1. **12:00 UTC (A-deck)**: NHC runs the synoptic analysis and produces
+   the OFCL forecast. The A-deck records the analysis position (t=0)
+   and the full forecast cone (t=1 through t=120h).
+
+2. **15:00 UTC (TCM Advisory 17)**: NHC publishes the Forecast/Advisory.
+   The current position (t=0) is updated to where the storm is now
+   (3 hours later). The forecast points are carried over from the
+   12Z analysis unchanged.
+
+3. **18:00 UTC (TCP Advisory 17A)**: NHC issues an intermediate Public
+   Advisory (triggered by active coastal watches). This updates the
+   current position only. No new TCM is issued, no new forecast.
+   The forecast cone shown in the graphic is redrawn from Advisory 17.
+
+4. **18:00 UTC (A-deck)**: Simultaneously, NHC runs a new synoptic
+   analysis cycle with its own independent forecast.
+
+```{python}
+#| label: analysis-cycle-plot
+#| fig-cap: "MELISSA Oct 25: A single NHC analysis cycle showing how the A-deck synoptic analysis (blue), TCM advisory (red), intermediate TCP (orange), and next A-deck cycle (teal) relate. Hover to compare positions and forecast points."
+fig = go.Figure()
+
+# A-deck 12Z
+fig.add_trace(go.Scattermap(
+    lat=adeck_12z["lat"], lon=adeck_12z["lon"],
+    mode="lines+markers",
+    line={"width": 2, "color": "#3388ff"},
+    marker={
+        "size": [14 if lt == 0 else 6 for lt in adeck_12z["leadtime"]],
+        "color": "#3388ff",
+    },
+    name="A-deck 12Z (analysis+forecast)",
+    hoverinfo="text",
+    text=[
+        f"A-deck 12Z<br>lt={int(lt)}h valid={vt}<br>"
+        f"{la:.1f}N {abs(lo):.1f}W {ws:.0f}kt"
+        for lt, vt, la, lo, ws in zip(
+            adeck_12z["leadtime"], adeck_12z["valid_time"],
+            adeck_12z["lat"], adeck_12z["lon"],
+            adeck_12z["wind_speed"],
+        )
+    ],
+))
+
+# A-deck 18Z
+fig.add_trace(go.Scattermap(
+    lat=adeck_18z["lat"], lon=adeck_18z["lon"],
+    mode="lines+markers",
+    line={"width": 2, "color": "#2a9d8f"},
+    marker={
+        "size": [14 if lt == 0 else 6 for lt in adeck_18z["leadtime"]],
+        "color": "#2a9d8f",
+    },
+    name="A-deck 18Z (new cycle)",
+    hoverinfo="text",
+    text=[
+        f"A-deck 18Z<br>lt={int(lt)}h valid={vt}<br>"
+        f"{la:.1f}N {abs(lo):.1f}W {ws:.0f}kt"
+        for lt, vt, la, lo, ws in zip(
+            adeck_18z["leadtime"], adeck_18z["valid_time"],
+            adeck_18z["lat"], adeck_18z["lon"],
+            adeck_18z["wind_speed"],
+        )
+    ],
+))
+
+# TCM Advisory 17 (15Z): t=0 from observed track + forecast
+tcm_t0_lat = float(tcm_t0.iloc[0]["latitude"])
+tcm_t0_lon = float(tcm_t0.iloc[0]["longitude"])
+tcm_lats = [tcm_t0_lat] + list(tcm_adv17["latitude"].astype(float))
+tcm_lons = [tcm_t0_lon] + list(tcm_adv17["longitude"].astype(float))
+tcm_labels = [
+    f"TCM Adv 17 t=0<br>15Z Oct 25<br>"
+    f"{tcm_t0_lat:.1f}N {abs(tcm_t0_lon):.1f}W"
+] + [
+    f"TCM Adv 17 forecast<br>valid={vt}<br>"
+    f"{la}N {abs(lo)}W {ws}kt"
+    for vt, la, lo, ws in zip(
+        tcm_adv17["validTime"], tcm_adv17["latitude"],
+        tcm_adv17["longitude"], tcm_adv17["maxwind"],
+    )
+]
+
+fig.add_trace(go.Scattermap(
+    lat=tcm_lats, lon=tcm_lons,
+    mode="lines+markers",
+    line={"width": 3, "color": "#e63946"},
+    marker={"size": [16] + [8] * len(tcm_adv17), "color": "#e63946"},
+    name="TCM Adv 17 (15Z)",
+    hoverinfo="text",
+    text=tcm_labels,
+))
+
+# TCP Advisory 17A (18Z): single point from NHC archive
+fig.add_trace(go.Scattermap(
+    lat=[tcp_17a_lat], lon=[tcp_17a_lon],
+    mode="markers",
+    marker={"size": 22, "color": "rgba(255,140,0,0.6)"},
+    name="TCP Adv 17A (18Z, t=0 update only)",
+    hoverinfo="text",
+    text=[
+        f"TCP 17A (intermediate)<br>18Z Oct 25<br>"
+        f"{tcp_17a_lat}N {abs(tcp_17a_lon)}W<br>"
+        f"{tcp_17a_wind}<br>"
+        f"Position update only, no new forecast"
+    ],
+))
+
+fig.update_layout(
+    title=dict(
+        text=(
+            "<b>MELISSA Oct 25: NHC Analysis Cycle</b><br>"
+            "<span style='font-size:11px'>"
+            "A-deck 12Z synoptic analysis (blue) -> 15Z TCM "
+            "advisory (red) -> 18Z intermediate TCP (orange) "
+            "+ new A-deck 18Z cycle (teal)"
+            "</span>"
+        ),
+        font_size=14,
+    ),
+    map={
+        "style": "carto-positron",
+        "center": {"lat": 17, "lon": -76.5},
+        "zoom": 6,
+    },
+    height=700,
+    margin={"l": 20, "r": 20, "t": 70, "b": 20},
+    legend={
+        "yanchor": "top", "y": 0.98, "x": 0.01,
+        "bgcolor": "rgba(255,255,255,0.9)",
+    },
+)
+fig.show()
+```
+
+Key observations from hovering over the points:
+
+- The **A-deck 12Z lt=3** forecast point (valid 15Z) has **identical
+  coordinates** to the **TCM Advisory 17 t=0** -- confirming they
+  share the same forecast package
+- The **TCM forecast points** (valid 00Z Oct 26 onward) match the
+  **A-deck 12Z forecast points** (lt=12, 24, 36...) exactly
+- The **TCP 17A** position (16.6N 75.2W) is slightly offset from
+  the TCM t=0 (16.5N 75.1W) -- the storm moved 0.1 degrees in 3h
+- The **A-deck 18Z** starts a completely new forecast cycle with
+  different forecast positions than the 12Z cycle
+
+## Verification: MILTON-24
+
+We verify the same relationship holds for MILTON-24, comparing the
+GDACS timeline against the A-deck in our prod database.
+
+### t=0 Offset Across All Advisories
+
+Comparing each GDACS advisory's observational position (t=0) to the
+nearest A-deck analysis position (also t=0, but from a different
+synoptic time). The blue line below is **not a forecast** -- it chains
+together the t=0 analysis positions from successive A-deck issuances
+(one every 6 hours). The red line chains GDACS t=0 positions (also
+every 6 hours, but offset by 3 hours). The systematic offset grows
+as the storm speeds up.
+
+```{python}
+#| label: milton-setup
+#| output: false
+tl_milton = get_timeline(1001111)  # MILTON-24
+actual_milton = tl_milton[
+    tl_milton["actual"].astype(str).str.lower() == "true"
+]
+
+with engine_prod.connect() as conn:
+    nhc_milton = pd.read_sql("""
+        SELECT issued_time, valid_time, leadtime,
+               ST_Y(geometry) as lat, ST_X(geometry) as lon,
+               wind_speed
+        FROM storms.nhc_tracks_geo
+        WHERE atcf_id = 'AL142024'
+        ORDER BY issued_time, leadtime
+    """, conn)
+
+lt0_milton = nhc_milton[nhc_milton["leadtime"] == 0]
+```
+
+```{python}
+#| label: milton-offset
+rows = []
+for _, adv in actual_milton.iterrows():
+    g_t = adv["advisory_datetime"]
+    g_lat = adv["latitude"]
+    g_lon = adv["longitude"]
+
+    dt_h = (
+        lt0_milton["issued_time"] - g_t
+    ).dt.total_seconds().abs() / 3600
+    best = dt_h.idxmin()
+    n = lt0_milton.loc[best]
+    dist = np.sqrt(
+        (n["lat"] - g_lat) ** 2 + (n["lon"] - g_lon) ** 2
+    )
+
+    rows.append({
+        "gdacs_time": g_t,
+        "adeck_time": n["issued_time"],
+        "dt_hours": (g_t - n["issued_time"]).total_seconds() / 3600,
+        "dist_deg": round(dist, 3),
+    })
+
+df_compare = pd.DataFrame(rows)
+df_compare
+```
+
+### Forecast Steps Match Exactly
+
+Comparing GDACS forecast rows from the last issuance to the
+corresponding A-deck forecast points confirms the same pattern:
+t=0 differs, t>=1 matches at 0.000 degrees.
+
+```{python}
+#| label: milton-forecast-match
+gdacs_fc_milton = tl_milton[
+    tl_milton["actual"].astype(str).str.lower() != "true"
+]
+gdacs_last_milton = actual_milton.iloc[-1]
+
+adeck_issued_time = (
+    gdacs_last_milton["advisory_datetime"] - pd.Timedelta(hours=3)
+)
+
+with engine_prod.connect() as conn:
+    adeck_fc_milton = pd.read_sql("""
+        SELECT leadtime, valid_time,
+               ST_Y(geometry) as lat, ST_X(geometry) as lon,
+               wind_speed
+        FROM storms.nhc_tracks_geo
+        WHERE atcf_id = 'AL142024'
+        AND issued_time = %s
+        ORDER BY leadtime
+    """, conn, params=(adeck_issued_time,))
+
+rows_fc = []
+
+a0 = adeck_fc_milton[adeck_fc_milton["leadtime"] == 0].iloc[0]
+dist0 = np.sqrt(
+    (a0["lat"] - gdacs_last_milton["latitude"]) ** 2
+    + (a0["lon"] - gdacs_last_milton["longitude"]) ** 2
+)
+rows_fc.append({
+    "step": "t=0 (observational)",
+    "adeck_valid": a0["valid_time"],
+    "gdacs_time": gdacs_last_milton["advisory_datetime"],
+    "dist_deg": round(dist0, 3),
+})
+
+for i, (_, fc) in enumerate(gdacs_fc_milton.iterrows()):
+    a_match = adeck_fc_milton[
+        adeck_fc_milton["valid_time"] == fc["advisory_datetime"]
+    ]
+    if len(a_match) > 0:
+        a = a_match.iloc[0]
+        dist = np.sqrt(
+            (a["lat"] - fc["latitude"]) ** 2
+            + (a["lon"] - fc["longitude"]) ** 2
+        )
+        rows_fc.append({
+            "step": f"t={i+1} (forecast)",
+            "adeck_valid": a["valid_time"],
+            "gdacs_time": fc["advisory_datetime"],
+            "dist_deg": round(dist, 3),
+        })
+
+pd.DataFrame(rows_fc)
+```
+
+## Matching Function
+
+Since forecast points are identical between TCM and A-deck, matching
+GDACS to `atcf_id` is straightforward:
+
+1. Take the GDACS forecast rows (`actual=False`) -- these share
+   coordinates with A-deck forecast rows at the same `valid_time`
+2. Query `nhc_tracks_geo` for rows where `valid_time` matches a
+   GDACS forecast datetime and `leadtime > 0`
+3. Verify spatial proximity (should be 0.000 deg) and return `atcf_id`
+
+For completed storms with no forecast rows, fall back to matching the
+first actual advisory spatially against A-deck rows whose `valid_time`
+matches the GDACS advisory time.
+
+```{python}
+#| label: matching-function
+def match_gdacs_to_atcf(timeline, engine, max_dist_deg=0.5):
+    """Match a GDACS timeline to an NHC atcf_id.
+
+    Strategy 1: exact valid_time match on forecast points (t>=1).
+    Strategy 2: spatial match on first actual advisory against
+                A-deck forecast rows valid at the same time.
+    """
+    actual = timeline[
+        timeline["actual"].astype(str).str.lower() == "true"
+    ]
+    forecast = timeline[
+        timeline["actual"].astype(str).str.lower() != "true"
+    ]
+
+    with engine.connect() as conn:
+        # Strategy 1: exact match on forecast valid_times
+        if len(forecast) > 0:
+            for _, fc in forecast.iterrows():
+                vt = fc["advisory_datetime"]
+                match = pd.read_sql("""
+                    SELECT atcf_id,
+                           ST_Y(geometry) as lat,
+                           ST_X(geometry) as lon
+                    FROM storms.nhc_tracks_geo
+                    WHERE valid_time = %s AND leadtime > 0
+                """, conn, params=(vt,))
+
+                if len(match) == 0:
+                    continue
+
+                dists = np.sqrt(
+                    (match["lat"] - fc["latitude"]) ** 2
+                    + (match["lon"] - fc["longitude"]) ** 2
+                )
+                best = dists.idxmin()
+                if dists[best] < max_dist_deg:
+                    return match.loc[best, "atcf_id"]
+
+        # Strategy 2: spatial match on first actual advisory
+        if len(actual) > 0:
+            first = actual.iloc[0]
+            match = pd.read_sql("""
+                SELECT atcf_id,
+                       ST_Distance(
+                           geometry,
+                           ST_SetSRID(ST_MakePoint(%s, %s), 4326)
+                       ) as dist
+                FROM storms.nhc_tracks_geo
+                WHERE leadtime > 0
+                AND valid_time BETWEEN %s AND %s
+                ORDER BY dist
+                LIMIT 1
+            """, conn, params=(
+                float(first["longitude"]),
+                float(first["latitude"]),
+                first["advisory_datetime"] - pd.Timedelta(days=1),
+                first["advisory_datetime"] + pd.Timedelta(days=1),
+            ))
+
+            if len(match) > 0 and match.iloc[0]["dist"] < max_dist_deg:
+                return match.iloc[0]["atcf_id"]
+
+    return None
+```
+
+```{python}
+#| label: matching-validation
+events = get_active_cyclones(
+    from_date="2024-06-01", to_date="2024-12-31",
+    alert_levels=["red", "orange"],
+)
+
+results = []
+for _, ev in events.iterrows():
+    try:
+        t = get_timeline(ev["eventid"])
+        atcf = match_gdacs_to_atcf(t, engine_prod)
+        results.append({
+            "gdacs_name": ev["name"],
+            "atcf_id": atcf if atcf else "no match (non-NHC)",
+        })
+    except Exception:
+        results.append({
+            "gdacs_name": ev["name"],
+            "atcf_id": "error",
+        })
+
+pd.DataFrame(results)
+```
+
+This function has been incorporated into the `src.datasets.gdacs`
+module as `match_gdacs_to_nhc()` for reuse across the project.
+
+## Summary
+
+- The NHC A-deck and TCM advisory are two views of the same forecast
+  cycle, timestamped 3 hours apart (synoptic vs issue time).
+- The TCM updates only the **observational position (t=0)**. All
+  **forecast steps (t>=1) are identical** to the A-deck.
+- Matching GDACS to `atcf_id` is therefore trivial: compare forecast
+  `valid_time` values for exact coordinate matches.
+- Non-NHC storms (JTWC/RSMC source) correctly return no match since
+  they have no A-deck data in the database.

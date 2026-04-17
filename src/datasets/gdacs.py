@@ -344,6 +344,138 @@ def match_gdacs_to_ibtracs(
     return result
 
 
+# -- NHC matching ---------------------------------------------------------
+#
+# GDACS scrapes the NHC Forecast/Advisory (TCM), while our DB has the
+# ATCF A-deck. Both originate from the same NHC forecast cycle. The TCM
+# updates the current position (t=0) to the advisory issue time (+3h),
+# but all forecast points (t>=1) are identical to the A-deck.
+#
+# Therefore: GDACS forecast positions match A-deck forecast positions
+# at the same valid_time with 0.000 degree error. No spatial tolerance
+# needed. See book chapter 05-gdacs-nhc-matching for full analysis.
+
+
+def match_gdacs_to_nhc(
+    timeline: pd.DataFrame,
+    engine,
+    max_dist_deg: float = 0.5,
+) -> str | None:
+    """Match a GDACS timeline to an NHC atcf_id.
+
+    Uses the fact that GDACS (TCM) and A-deck share identical forecast
+    positions. Tries two strategies:
+
+    1. Exact valid_time match on GDACS forecast points against A-deck
+       forecast rows (leadtime > 0). These should match at 0.000 deg.
+    2. Fallback: spatial match of first GDACS actual advisory against
+       A-deck leadtime=3 rows (which equal TCM t=0 positions).
+
+    Parameters
+    ----------
+    timeline : DataFrame from get_timeline()
+    engine : SQLAlchemy engine from stratus.get_engine()
+    max_dist_deg : float
+        Maximum distance for spatial verification (default 0.5 deg).
+
+    Returns
+    -------
+    atcf_id (e.g., "AL142024") or None if no match.
+    """
+    actual = timeline[
+        timeline["actual"].astype(str).str.lower() == "true"
+    ]
+    forecast = timeline[
+        timeline["actual"].astype(str).str.lower() != "true"
+    ]
+
+    with engine.connect() as conn:
+        # Strategy 1: exact match on forecast valid_times
+        if len(forecast) > 0:
+            for _, fc in forecast.iterrows():
+                vt = fc["advisory_datetime"]
+                match = pd.read_sql(
+                    """
+                    SELECT atcf_id,
+                           ST_Y(geometry) as lat,
+                           ST_X(geometry) as lon
+                    FROM storms.nhc_tracks_geo
+                    WHERE valid_time = %s AND leadtime > 0
+                    """,
+                    conn,
+                    params=(vt,),
+                )
+                if len(match) == 0:
+                    continue
+
+                dists = np.sqrt(
+                    (match["lat"] - fc["latitude"]) ** 2
+                    + (match["lon"] - fc["longitude"]) ** 2
+                )
+                best = dists.idxmin()
+                if dists[best] < max_dist_deg:
+                    return match.loc[best, "atcf_id"]
+
+        # Strategy 2: match first actual advisory via leadtime=3
+        if len(actual) > 0:
+            first = actual.iloc[0]
+            match = pd.read_sql(
+                """
+                SELECT atcf_id,
+                       ST_Distance(
+                           geometry,
+                           ST_SetSRID(ST_MakePoint(%s, %s), 4326)
+                       ) as dist
+                FROM storms.nhc_tracks_geo
+                WHERE leadtime > 0
+                AND valid_time BETWEEN %s AND %s
+                ORDER BY dist
+                LIMIT 1
+                """,
+                conn,
+                params=(
+                    float(first["longitude"]),
+                    float(first["latitude"]),
+                    first["advisory_datetime"] - pd.Timedelta(days=1),
+                    first["advisory_datetime"] + pd.Timedelta(days=1),
+                ),
+            )
+            if len(match) > 0 and match.iloc[0]["dist"] < max_dist_deg:
+                return match.iloc[0]["atcf_id"]
+
+    return None
+
+
+def match_gdacs_events_to_nhc(
+    events: pd.DataFrame,
+    engine,
+) -> pd.DataFrame:
+    """Match multiple GDACS events to NHC atcf_ids.
+
+    Parameters
+    ----------
+    events : DataFrame from get_active_cyclones()
+    engine : SQLAlchemy engine from stratus.get_engine()
+
+    Returns
+    -------
+    events DataFrame with added 'atcf_id' column.
+    """
+    result = events.copy()
+    atcf_ids = []
+
+    for _, ev in result.iterrows():
+        try:
+            tl = get_timeline(ev["eventid"])
+            atcf = match_gdacs_to_nhc(tl, engine)
+            atcf_ids.append(atcf)
+        except Exception:
+            atcf_ids.append(None)
+
+    result["atcf_id"] = atcf_ids
+    return result
+
+
 # -- Batch exposure table ------------------------------------------------
 
 

@@ -6,13 +6,16 @@ readme = "README.md"
 requires-python = ">=3.12.4"
 dependencies = [
     "great-tables>=0.21.0",
+    "marimo>=0.9",
     "matplotlib>=3.10.8",
     "ocha-stratus>=0.1.7",
     "openpyxl>=3.1.5",
     "pandas>=3.0.1",
     "plotnine>=0.15.3",
     "python-dotenv>=1.2.2",
+    "requests>=2.32",
     "scipy>=1.17.1",
+    "statsmodels>=0.14",
 ]
 
 [dependency-groups]

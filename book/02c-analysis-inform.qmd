@@ -31,11 +31,9 @@ the composite scores.
 import sys
 sys.path.insert(0, "..")
 
-import ocha_stratus as stratus
 import pandas as pd
 import numpy as np
 import statsmodels.api as sm
-from io import BytesIO
 from great_tables import GT, loc, style
 from plotnine import *
 import warnings
@@ -107,39 +105,24 @@ authentication is required.
 #| label: load-risk
 #| output: false
 
-# Fetch INFORM Risk via the Trends endpoint (all years, default workflow)
-import requests
+# INFORM Risk + Severity are pre-fetched by scripts/refresh_inform_composite.py
+# and stored in a single parquet on blob. Here we read that parquet and
+# derive per-indicator views.
+from src.datasets.inform import load_inform
 
-API_BASE = "https://drmkc.jrc.ec.europa.eu/inform-index/API/InformAPI"
+df_inform = load_inform()
+
 RISK_INDICATORS = ["INFORM", "HA", "VU", "CC"]
-
-# Get current default workflow
-wf = requests.get(f"{API_BASE}/Workflows/Default", timeout=30).json()
-wf_id = wf["WorkflowId"]
-
-# Fetch all years in one call via Trends endpoint
-indicator_str = ",".join(RISK_INDICATORS)
-r = requests.get(
-    f"{API_BASE}/Countries/Trends/",
-    params={"WorkflowId": wf_id, "IndicatorId": indicator_str},
-    timeout=60,
-)
-r.raise_for_status()
-df_risk_raw = pd.DataFrame(r.json())
-
-# Pivot to one row per country-year
 df_risk = (
-    df_risk_raw[["Iso3", "GNAYear", "IndicatorId", "IndicatorScore"]]
-    .pivot_table(
-        index=["Iso3", "GNAYear"],
-        columns="IndicatorId",
-        values="IndicatorScore",
-        aggfunc="first",
-    )
-    .reset_index()
-    .rename(columns={"Iso3": "iso3", "GNAYear": "year"})
+    df_inform[["iso3", "year", "inform_risk", "inform_ha",
+               "inform_vu", "inform_cc"]]
+    .drop_duplicates(subset=["iso3", "year"])
+    .rename(columns={
+        "inform_risk": "INFORM", "inform_ha": "HA",
+        "inform_vu": "VU", "inform_cc": "CC",
+    })
+    .reset_index(drop=True)
 )
-df_risk.columns.name = None
 ```
 
 ```{python}
@@ -166,45 +149,29 @@ reclassifications), we take the maximum severity score.
 ```{python}
 #| label: load-severity
 #| output: false
-df_sev_raw = stratus.load_parquet_from_blob(
-    "output/acaps_inform_severity/raw.parquet",
-    stage="prod",
-    container_name="hdx-signals",
-)
-df_sev_raw["date"] = pd.to_datetime(df_sev_raw["date"])
 
-# Keep country-level, drop nulls, aggregate multi-crisis months
+# Severity is already aggregated to iso3+year_month (max across multi-crisis
+# country-months) upstream in scripts/refresh_inform_composite.py.
 df_sev = (
-    df_sev_raw[df_sev_raw["country_level"] == "Yes"]
-    .dropna(subset=["inform_severity_index"])
-    .copy()
-)
-df_sev["year_month"] = df_sev["date"].dt.to_period("M")
-df_sev = (
-    df_sev.groupby(["iso3", "year_month"])
-    .agg(
-        severity=("inform_severity_index", "max"),
-        impact=("impact_crisis", "max"),
-        conditions=("people_condition", "max"),
-        complexity=("complexity", "max"),
-    )
-    .reset_index()
+    df_inform[["iso3", "year_month", "inform_severity", "inform_impact",
+               "inform_conditions", "inform_complexity"]]
+    .dropna(subset=["inform_severity"])
+    .drop_duplicates()
+    .rename(columns={
+        "inform_severity": "severity", "inform_impact": "impact",
+        "inform_conditions": "conditions", "inform_complexity": "complexity",
+    })
+    .reset_index(drop=True)
 )
 ```
 
 ```{python}
 #| label: severity-summary
-date_min = df_sev_raw[df_sev_raw["country_level"] == "Yes"]["date"].min().date()
-date_max = df_sev_raw[df_sev_raw["country_level"] == "Yes"]["date"].max().date()
+ym_min = df_sev["year_month"].min()
+ym_max = df_sev["year_month"].max()
 print(f"INFORM Severity: {len(df_sev)} country-months, "
       f"{df_sev['iso3'].nunique()} countries, "
-      f"{date_min} to {date_max}")
-
-# Multi-crisis months
-raw_cl = df_sev_raw[df_sev_raw["country_level"] == "Yes"]
-multi = raw_cl.groupby(["iso3", "date"]).size()
-n_multi = (multi > 1).sum()
-print(f"Country-months with multiple crises (aggregated via max): {n_multi}")
+      f"{ym_min} to {ym_max}")
 ```
 
 ### Joining INFORM Data to the 3RM Dataset
@@ -241,82 +208,12 @@ For INFORM Severity, we apply two filters before joining:
 #| label: load-3rm
 #| output: false
 
-_3RM_BLOB = (
-    "ds-storm-impact-harmonisation/raw/"
-    "CERF 3RM - RR Regression Model - version 1.8.xlsx"
-)
+# build_training_frame loads the 3RM Excel, joins it with the INFORM
+# parquet on iso3+year (Risk) and iso3+year_month (Severity), and
+# computes inform_composite. Same logic that used to live here inline.
+from src.datasets.inform import build_training_frame
 
-# All 86 country names in 3RM MergedData -> ISO3
-_COUNTRY_TO_ISO3 = {
-    "Afghanistan": "AFG", "Angola": "AGO", "Antigua and Barbuda": "ATG",
-    "Armenia": "ARM", "Azerbaijan": "AZE", "Bahamas": "BHS",
-    "Bangladesh": "BGD", "Bolivia": "BOL", "Brazil": "BRA",
-    "Burkina Faso": "BFA", "Burundi": "BDI", "Cameroon": "CMR",
-    "Central African Republic": "CAF", "Chad": "TCD", "Colombia": "COL",
-    "Comoros": "COM", "Cote d'Ivoire": "CIV", "Cuba": "CUB",
-    "Democratic People's Republic of Korea": "PRK",
-    "Democratic Republic of the Congo": "COD",
-    "Djibouti": "DJI", "Dominica": "DMA", "Ecuador": "ECU",
-    "Egypt": "EGY", "El Salvador": "SLV", "Equatorial Guinea": "GNQ",
-    "Eritrea": "ERI", "Ethiopia": "ETH", "Fiji": "FJI",
-    "Gambia": "GMB", "Guatemala": "GTM", "Guinea": "GIN",
-    "Haiti": "HTI", "Honduras": "HND", "India": "IND",
-    "Indonesia": "IDN", "Iraq": "IRQ",
-    "Islamic Republic of Iran": "IRN", "Jamaica": "JAM",
-    "Jordan": "JOR", "Kenya": "KEN", "Kyrgyzstan": "KGZ",
-    "Lao People's Democratic Republic": "LAO",
-    "Lebanon": "LBN", "Lesotho": "LSO", "Libya": "LBY",
-    "Madagascar": "MDG", "Malawi": "MWI", "Mali": "MLI",
-    "Mauritania": "MRT", "Mongolia": "MNG", "Mozambique": "MOZ",
-    "Myanmar": "MMR", "Namibia": "NAM", "Nepal": "NPL",
-    "Nicaragua": "NIC", "Niger": "NER", "Nigeria": "NGA",
-    "Pakistan": "PAK", "Panama": "PAN", "Papua New Guinea": "PNG",
-    "Peru": "PER", "Philippines": "PHL",
-    "Republic of Congo": "COG", "Republic of the Sudan": "SDN",
-    "Rwanda": "RWA", "Saint Vincent and the Grenadines": "VCT",
-    "Samoa": "WSM", "Somalia": "SOM", "South Sudan": "SSD",
-    "Sri Lanka": "LKA", "Sudan": "SDN", "Swaziland": "SWZ",
-    "Syrian Arab Republic": "SYR", "Timor-Leste": "TLS",
-    "Tonga": "TON", "Uganda": "UGA", "Ukraine": "UKR",
-    "United Republic of Tanzania": "TZA", "Vanuatu": "VUT",
-    "Venezuela": "VEN", "Viet Nam": "VNM", "Yemen": "YEM",
-    "Zambia": "ZMB", "Zimbabwe": "ZWE", "oPt": "PSE",
-}
-
-raw_3rm = stratus.load_blob_data(_3RM_BLOB)
-df_3rm = pd.read_excel(BytesIO(raw_3rm), sheet_name="MergedData")
-df_3rm = df_3rm.rename(columns={"Application Code": "ApplicationCode"})
-df_3rm["date"] = pd.to_datetime(df_3rm["Date of Most Recent Submission"])
-df_3rm["iso3"] = df_3rm["Country"].map(_COUNTRY_TO_ISO3)
-df_3rm["year"] = df_3rm["Year"]
-df_3rm["year_month"] = df_3rm["date"].dt.to_period("M")
-
-# Join INFORM Risk (by iso3 + year)
-df = df_3rm.merge(
-    df_risk.rename(columns={
-        "INFORM": "inform_risk", "HA": "inform_ha",
-        "VU": "inform_vu", "CC": "inform_cc",
-    }),
-    on=["iso3", "year"],
-    how="left",
-)
-
-# Join INFORM Severity (by iso3 + year_month)
-df = df.merge(
-    df_sev.rename(columns={
-        "severity": "inform_severity", "impact": "inform_impact",
-        "conditions": "inform_conditions", "complexity": "inform_complexity",
-    }),
-    on=["iso3", "year_month"],
-    how="left",
-)
-
-# Composite variable: mean(Risk, Severity) where both available, else Risk alone
-df["inform_composite"] = np.where(
-    df["inform_severity"].notna(),
-    (df["inform_risk"] + df["inform_severity"]) / 2,
-    df["inform_risk"],
-)
+df = build_training_frame(inform=df_inform)
 ```
 
 ```{python}

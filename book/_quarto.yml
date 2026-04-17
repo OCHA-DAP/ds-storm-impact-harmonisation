@@ -13,11 +13,15 @@ book:
     logo: logo_white.png
   chapters:
     - index.qmd
-    # - 02-analysis.qmd
-    - 02b-analysis-cerf-api.qmd
-    - 02c-analysis-inform.qmd
-    - 03-gdacs-realtime.qmd
-    - 04-nhc-wsp-exploration.qmd
+    - part: "CERF Predictions"
+      chapters:
+        - 02b-analysis-cerf-api.qmd
+        - 02c-analysis-inform.qmd
+    - part: "Monitoring Pipeline Exploration"
+      chapters:
+        - 03-gdacs-realtime.qmd
+        - 04-nhc-wsp-exploration.qmd
+        - 05-gdacs-nhc-matching.qmd
     - part: "Appendices"
       chapters:
         - 01-data-merge.qmd
