@@ -111,11 +111,15 @@ authentication is required.
 from src.datasets.inform import load_inform
 
 df_inform = load_inform()
+# Exclude forward-carried rows (risk_source_year != year) — those only
+# exist to serve the production predictor app for the current calendar
+# year, not for historical analysis.
+df_inform_real = df_inform[df_inform["risk_source_year"] == df_inform["year"]]
 
 RISK_INDICATORS = ["INFORM", "HA", "VU", "CC"]
 df_risk = (
-    df_inform[["iso3", "year", "inform_risk", "inform_ha",
-               "inform_vu", "inform_cc"]]
+    df_inform_real[["iso3", "year", "inform_risk", "inform_ha",
+                    "inform_vu", "inform_cc"]]
     .drop_duplicates(subset=["iso3", "year"])
     .rename(columns={
         "inform_risk": "INFORM", "inform_ha": "HA",
@@ -153,8 +157,9 @@ reclassifications), we take the maximum severity score.
 # Severity is already aggregated to iso3+year_month (max across multi-crisis
 # country-months) upstream in scripts/refresh_inform_composite.py.
 df_sev = (
-    df_inform[["iso3", "year_month", "inform_severity", "inform_impact",
-               "inform_conditions", "inform_complexity"]]
+    df_inform_real[["iso3", "year_month", "inform_severity",
+                    "inform_impact", "inform_conditions",
+                    "inform_complexity"]]
     .dropna(subset=["inform_severity"])
     .drop_duplicates()
     .rename(columns={
