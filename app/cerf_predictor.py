@@ -38,7 +38,6 @@ def _load_data():
         load_inform,
     )
     from src.models.cerf_inform import (
-        ALLOWED_EMERGENCY_TYPES,
         fit_model,
         predict,
     )
@@ -71,13 +70,26 @@ def _load_data():
     if default_month_label not in month_options:
         default_month_label = "— (annual, Risk-only)"
 
+    # Labels shown in UI → underlying dummy-column name used by the model.
+    emergency_labels = {
+        "Storm": "Storm",
+        "Flood": "Flood",
+        "Drought": "Drought",
+        "Other Natural Disaster": "OtherNatural",
+        "Cholera": "Cholera",
+        "Ebola": "Ebola",
+        "Other Health Emergency": "OtherHealth",
+        "Displacement and Conflict": "DisplConfl",
+        "Any Other": "Other",
+    }
+
     refreshed = inform_df["refreshed_at"].iloc[0]
     return (
-        ALLOWED_EMERGENCY_TYPES,
         calc_inform_composite,
         country_options,
         default_month_label,
         default_year,
+        emergency_labels,
         inform_df,
         model,
         month_options,
@@ -103,7 +115,7 @@ def _intro(mo):
     Estimate the expected CERF rapid-response allocation size for a given
     emergency. Pick an emergency type, a country and date, the funding
     being requested, and the number of people targeted &mdash; the model
-    returns a median estimate and a 95% prediction interval showing how
+    returns a median estimate and an 80% prediction interval showing how
     much individual allocations typically vary around that central value.
     <span style="color:#666;font-style:italic;">
       Intended as a rough guide, not a forecast.
@@ -117,16 +129,16 @@ def _intro(mo):
 
 @app.cell
 def _inputs(
-    ALLOWED_EMERGENCY_TYPES,
     country_options,
     default_month_label,
     default_year,
+    emergency_labels,
     mo,
     month_options,
     year_options,
 ):
     emergency = mo.ui.dropdown(
-        options=list(ALLOWED_EMERGENCY_TYPES),
+        options=emergency_labels,
         value="Storm",
         label="Emergency type",
     )
@@ -145,15 +157,21 @@ def _inputs(
         value=default_month_label,
         label="Month",
     )
-    # No step= so any positive number is accepted; HTML otherwise snaps
-    # typed values to start + N*step, which rejects small values.
+    # Default to 0 so the user must explicitly enter values. The predict
+    # cell blocks on 0 and shows a "please enter values" message.
+    # No step= because HTML would snap typed values to start + N*step.
     funding = mo.ui.number(
-        start=1, value=5_000_000,
+        start=0, value=0,
         label="Funding required (USD)",
     )
     targeted = mo.ui.number(
-        start=1, value=200_000,
+        start=0, value=0,
         label="People targeted",
+    )
+
+    _date_hint = mo.Html(
+        "<div style='color:#888;font-size:0.8em;margin-top:-2px;'>"
+        "Year and month default to today&rsquo;s date.</div>"
     )
 
     form = mo.vstack(
@@ -165,6 +183,7 @@ def _inputs(
             mo.hstack(
                 [year, month], justify="start", align="center", gap=2,
             ),
+            _date_hint,
             mo.hstack(
                 [funding, targeted], justify="start", align="center", gap=2,
             ),
@@ -295,22 +314,32 @@ def _predict_cell(
     predict,
     targeted,
 ):
-    if lookup is None or funding.value is None or targeted.value is None:
-        result = None
-    elif float(funding.value) <= 0 or float(targeted.value) <= 0:
-        result = None
+    if lookup is None:
+        state, result = "no_inform", None
+    elif (
+        funding.value is None
+        or targeted.value is None
+        or float(funding.value) <= 0
+        or float(targeted.value) <= 0
+    ):
+        state, result = "missing_inputs", None
     else:
-        result = predict(model, {
-            "emergency_type": emergency.value,
-            "inform_composite": lookup["composite"],
-            "funding_required": float(funding.value),
-            "people_targeted": float(targeted.value),
-        })
-    return (result,)
+        state = "ok"
+        result = predict(
+            model,
+            {
+                "emergency_type": emergency.value,
+                "inform_composite": lookup["composite"],
+                "funding_required": float(funding.value),
+                "people_targeted": float(targeted.value),
+            },
+            alpha=0.20,  # 80% prediction interval
+        )
+    return result, state
 
 
 @app.cell
-def _prediction_numbers(mo, result):
+def _prediction_numbers(mo, result, state):
     def _fmt(v: float) -> str:
         if v >= 1e9:
             return f"${v / 1e9:.2f}B"
@@ -320,13 +349,16 @@ def _prediction_numbers(mo, result):
             return f"${v / 1e3:.0f}K"
         return f"${v:.0f}"
 
-    if result is None:
+    if state == "missing_inputs":
+        numbers = mo.md(
+            "*Enter funding required and people targeted to see a prediction.*"
+        )
+    elif state == "no_inform":
         numbers = mo.md(
             "*Prediction unavailable — no INFORM data for that country/year.*"
         )
     else:
         _median = result["point_usd_median"]
-        _mean = result["point_usd_mean"]
         _lo = result["lower_usd"]
         _hi = result["upper_usd"]
         numbers = mo.Html(
@@ -342,15 +374,7 @@ def _prediction_numbers(mo, result):
 
   <div style="font-size: 0.75em; text-transform: uppercase;
               letter-spacing: 0.05em; color: #666; margin-top: 18px;">
-    Mean (log-normal)
-  </div>
-  <div style="font-size: 1.15em; font-weight: 500; color: #333;">
-    {_fmt(_mean)}
-  </div>
-
-  <div style="font-size: 0.75em; text-transform: uppercase;
-              letter-spacing: 0.05em; color: #666; margin-top: 18px;">
-    95% prediction interval
+    80% prediction interval
   </div>
   <div style="font-size: 1.05em; color: #333;">
     {_fmt(_lo)} &nbsp;—&nbsp; {_fmt(_hi)}
@@ -362,8 +386,8 @@ def _prediction_numbers(mo, result):
 
 
 @app.cell
-def _prediction_plot(mo, result):
-    if result is None:
+def _prediction_plot(mo, result, state):
+    if state != "ok":
         chart = mo.md("")
     else:
         import matplotlib.pyplot as plt
@@ -374,12 +398,11 @@ def _prediction_plot(mo, result):
         _mu = result["log_prediction"]
         _sigma = result["log_sigma"]
         _median = result["point_usd_median"]
-        _mean = result["point_usd_mean"]
         _lo = result["lower_usd"]
         _hi = result["upper_usd"]
 
         _dist = stats.lognorm(s=_sigma, scale=np.exp(_mu))
-        # Plot a generous range around the 95% PI so the distribution
+        # Plot a generous range around the predictive distribution so the
         # tails are visible without dominating the view.
         _x_min = max(_dist.ppf(0.005), _lo * 0.3)
         _x_max = _dist.ppf(0.995)
@@ -391,11 +414,9 @@ def _prediction_plot(mo, result):
         _pi_mask = (_x >= _lo) & (_x <= _hi)
         ax.fill_between(
             _x[_pi_mask], _pdf[_pi_mask], alpha=0.25, color="#2166ac",
-            label="95% prediction interval",
+            label="80% prediction interval",
         )
         ax.axvline(_median, color="#F0635C", linewidth=2, label="Median")
-        ax.axvline(_mean, color="#555555", linewidth=1.5, linestyle="--",
-                   label="Mean")
 
         def _fmt_axis_usd(v, _pos):
             if v >= 1e9:
@@ -443,13 +464,13 @@ def _technical_note(mo, model, refreshed):
         "Technical note": mo.md(
             f"""
 **Model.** Ordinary least squares on ln(CERF allocation USD), fit on
-{int(model.nobs)} rapid-response allocations from 2016 onward. Adjusted
-R² = {model.rsquared_adj:.3f}. AIC = {model.aic:.1f}.
+{int(model.nobs)} rapid-response allocations from 2016 onward.
+Adjusted R² = {model.rsquared_adj:.3f}. AIC = {model.aic:.1f}.
 
-**Features.** Eight emergency-type dummies (base = "Other"): Storm,
-Flood, Drought, OtherNatural, Cholera, Ebola, OtherHealth,
-Displacement/Conflict. INFORM Composite (0–10). ln(funding required).
-ln(people targeted).
+**Features.** Eight emergency-type dummies (base = "Any Other"):
+Storm, Flood, Drought, Other Natural Disaster, Cholera, Ebola, Other
+Health Emergency, Displacement and Conflict. INFORM Composite (0–10).
+ln(funding required). ln(people targeted).
 
 **Data sources.** CERF 3RM v1.8 spreadsheet; INFORM Risk via DRMKC API;
 INFORM Severity via ACAPS (blob). The Composite is the mean of Risk
@@ -457,15 +478,31 @@ and Severity for country-months with both available, otherwise Risk
 alone.
 
 **Back-transform.** The model predicts ln(USD). The **median** USD is
-exp(ln-prediction). The **mean** applies a log-normal correction
-(+σ²/2) and is somewhat higher because the distribution is
-right-skewed. The **95% prediction interval** bounds are exponentiated
-from the log-scale observation interval.
+exp(ln-prediction). The **80% prediction interval** bounds are
+exponentiated from the log-scale observation interval.
 
-**Limitations.** The 2016+ training set skews toward historical funding
-patterns. Predictions for emergencies or countries unlike those in the
-training set should be treated cautiously. The interval reflects
-model uncertainty only, not policy or political factors.
+### Caveats — when to use with caution
+
+- **Country.** Only countries CERF has allocated to since 2016 are
+  listed in the dropdown. A country you don't see here is outside
+  the model's training set.
+- **Emergency type.** For types CERF rarely responds to (e.g.,
+  tsunami, wildfires), the model is unreliable even under "Any
+  Other".
+- **Funding required.** Reliable range is roughly **$2M to $2.5B**.
+  Outside this range the model is extrapolating — use with caution.
+- **People targeted.** Reliable range is roughly **2,500 to 45M**.
+  Same caveat.
+- **Large-allocation bias.** For predicted amounts above ~$20M, the
+  model tends to *underestimate* — CERF has occasionally allocated
+  more than the model suggests for catastrophic events.
+
+### Interpreting the output
+
+- Treat the median as **an input to decision-making**, not the
+  final amount.
+- The 80% prediction interval is the range 80% of comparable
+  historical allocations fall within.
 
 INFORM data refreshed {refreshed[:19]}.
 """
