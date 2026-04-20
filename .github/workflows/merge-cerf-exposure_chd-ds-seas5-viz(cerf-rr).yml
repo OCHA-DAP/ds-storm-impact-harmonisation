@@ -24,19 +24,19 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Set up Python
-        run: uv python install 3.12
-
-      # Build-time validation: install deps from the uv lockfile.
-      - name: Install dependencies (uv)
-        run: uv sync --frozen --no-dev
-
-      # Azure's Oryx build (SCM_DO_BUILD_DURING_DEPLOYMENT=true) installs
-      # via pip on the server, not uv. Export a pip-compatible
-      # requirements.txt from the uv lockfile so runtime deps match
-      # exactly what we just validated.
-      - name: Export requirements.txt for Oryx
-        run: uv export --format requirements-txt --no-hashes --no-dev --no-emit-project -o requirements.txt
+      # The Azure App Service container is pinned to Python 3.10 but the
+      # main project is developed against 3.12. To deploy without
+      # reconfiguring the repo, the app has its own minimal pyproject at
+      # app/pyproject.toml that targets 3.10+. We compile it here into a
+      # root-level requirements.txt that Oryx will pick up and install
+      # via pip on the server.
+      - name: Generate requirements.txt (Python 3.10, linux)
+        run: |
+          uv pip compile \
+            --python-version 3.10 \
+            --python-platform linux \
+            app/pyproject.toml \
+            -o requirements.txt
 
       - name: Upload artifact for deployment jobs
         uses: actions/upload-artifact@v4
@@ -84,8 +84,11 @@ jobs:
 #    App Service routes external traffic to whatever $PORT is configured
 #    (default 8000). Marimo must bind to 0.0.0.0 to accept proxied requests.
 #
-# 2. Python version: set to 3.12 in Configuration > General Settings to match
-#    the project's requires-python = ">=3.12.4".
+# 2. Python version: the App Service container is pinned to Python 3.10.
+#    The deploy requirements.txt is compiled against 3.10 via
+#    app/pyproject.toml (separate from the root project, which dev uses
+#    at 3.12). If the container is upgraded, bump --python-version in
+#    the compile step above and in app/pyproject.toml's requires-python.
 #
 # 3. Environment variables: copy the SAS tokens from the local .env into
 #    App Service > Configuration > Environment variables
