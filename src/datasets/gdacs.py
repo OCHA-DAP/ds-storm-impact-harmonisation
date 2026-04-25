@@ -105,6 +105,26 @@ def get_event_detail(eventid: int) -> dict:
     return r.json()
 
 
+def get_episode_detail(eventid: int, episodeid: int) -> dict:
+    """Fetch detail for a specific episode of a TC event.
+
+    Each episode represents one model run (issuance), typically
+    produced every 6 hours at each new advisory. The returned
+    structure mirrors ``get_event_detail()``, but resource URLs
+    (impact, timeline, locations) point to episode-specific data.
+    """
+    r = requests.get(
+        f"{BASE_URL}/events/getepisodedata",
+        params={
+            "eventtype": "TC",
+            "eventid": eventid,
+            "episodeid": episodeid,
+        },
+    )
+    r.raise_for_status()
+    return r.json()
+
+
 # -- Timeline (per-advisory exposure) ------------------------------------
 
 

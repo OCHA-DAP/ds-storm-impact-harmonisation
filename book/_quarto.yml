@@ -20,8 +20,12 @@ book:
     - part: "Monitoring Pipeline Exploration"
       chapters:
         - 03-gdacs-realtime.qmd
+        - 06-gdacs-episodes.qmd
         - 04-nhc-wsp-exploration.qmd
         - 05-gdacs-nhc-matching.qmd
+    - part: "Exposure Method Comparison"
+      chapters:
+        - 07-exposure-method-comparison.qmd
     - part: "Appendices"
       chapters:
         - 01-data-merge.qmd

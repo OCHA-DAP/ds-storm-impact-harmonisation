@@ -37,6 +37,18 @@ All in Azure Blob Storage (`projects` container, `dev` stage):
 - **Format**: `uv run ruff format`
 - **Lint fix**: `uv run ruff check --fix`
 
+## Book Chapter Caches
+
+Book chapters that fetch from external APIs cache responses locally to avoid re-fetching on every render. Caches live in `book/_cache/<chapter>/` and are populated by scripts in `scripts/`.
+
+| Chapter | Cache script | Cache dir |
+|---|---|---|
+| `06-gdacs-episodes.qmd` | `scripts/cache_gdacs_episodes.py` | `book/_cache/06-gdacs-episodes/` |
+
+To refresh a cache: `uv run python scripts/cache_gdacs_episodes.py`
+
+The `.qmd` files load from cache by default. Live API call code is kept in `eval: false` cells for reference.
+
 ## ocha_stratus — Azure Blob & Database Access
 
 The internal `ocha_stratus` package (repo: `OCHA-DAP/ocha-stratus`) provides helpers for reading/writing data to Azure Blob Storage and Azure PostgreSQL. Install with `uv add ocha-stratus` (available on the OCHA-DAP private index or GitHub).

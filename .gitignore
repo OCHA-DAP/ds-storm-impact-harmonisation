@@ -2,6 +2,8 @@
 .claude/
 book/_output/
 book/_freeze/
+book/_cache/
+data/
 __pycache__/
 *.pyc
 .ipynb_checkpoints/

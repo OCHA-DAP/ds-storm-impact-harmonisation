@@ -1,13 +1,19 @@
 ---
-title: "Technical Appendix: ADAM & GDACS Exploration"
+title: "Appendix: ADAM, GDACS & CERF Allocation Overlap"
 jupyter: ds-storm-impact
 ---
 
-ADAM (WFP) and GDACS were the original candidate exposure datasets for this
-analysis. However, both proved unusable due to limited temporal overlap with
-CERF allocations (2006–2023). This appendix documents the exploration and
-findings for completeness. The main analysis uses the OCHA exposure dataset
+This appendix documents the early work scoping ADAM (WFP) and GDACS as
+exposure sources for CERF Rapid Response allocation modelling. Both datasets
+were considered alongside the OCHA in-house exposure product; this chapter
+focuses on the question "can we use them to drive RR allocation modelling
+given CERF's 2006 to 2023 temporal coverage?" Because of the limited overlap,
+the answer was no, and the main analysis uses the OCHA exposure dataset
 instead (see @sec-sid-matching).
+
+A broader methodology-level comparison of OCHA vs GDACS, independent of
+CERF modelling constraints, is in
+[OCHA vs GDACS: Exposure Method Comparison](07-exposure-method-comparison.qmd).
 
 ```{python}
 #| label: setup

@@ -317,9 +317,10 @@ and overlaid them on multiple population grids:
 - The original CSV column names (`pop_34kt`, `pop_64kt`) are correct;
   the API buffer names are misleading
 - GDACS uses **GHSL (GHS-POP)**, the JRC's own Global Human Settlement
-  Layer, as its population grid. The remaining 5--20% discrepancy
-  depends on the population raster vintage and the exact wind field
-  construction method
+  Layer, as its population grid. Remaining discrepancies between our
+  reconstruction and GDACS figures are driven by **raster and
+  methodology configuration**, not a fundamental mismatch -- see
+  @sec-reconstruction-discrepancies
 
 ## Reconstructing Cumulative Exposure {#sec-reconstruction}
 
@@ -386,6 +387,45 @@ zeros (demonstrating gap-filling):
   population at the admin-unit level rather than grid-cell level:
   16 of 30 admin units for KALMAEGI show `pop_affected` exceeding
   the admin's actual population by up to 4x.
+
+### Sources of reconstruction discrepancy {#sec-reconstruction-discrepancies}
+
+The differences between our reconstructed figures and GDACS are not
+random error -- they trace to specific configuration choices in three
+areas:
+
+1. **Population raster vintage.** GDACS uses the latest GHSL release
+   (GHS-POP E2025, R2023A). Using the same raster and symmetric method,
+   we match within 1--7%. Switching to an older vintage (e.g. GHSL
+   E2020) systematically underestimates by ~5--6% because it reflects
+   lower population counts.
+
+   | Storm | Buffer | GDACS | GHSL E2025 (1km) | GHSL E2020 (100m) |
+   |---|---|---|---|---|
+   | KALMAEGI-25 | 34kt | 39.0M | 39.6M (102%) | 37.1M (95%) |
+   | KALMAEGI-25 | 64kt | 12.2M | 12.1M (99%) | 11.4M (94%) |
+   | MILTON-24 | 34kt | 25.0M | 26.7M (107%) | 25.9M (104%) |
+   | MILTON-24 | 64kt | 4.6M | 5.0M (107%) | 4.8M (104%) |
+
+   Note: the higher spatial resolution of GHSL E2020 (3 arc-sec vs
+   30 arc-sec) does not compensate for the older population estimate.
+   Vintage matters more than resolution.
+
+2. **Wind polygon method.** Symmetric (GDACS approach) vs asymmetric
+   changes results by 10--30% depending on how asymmetric the storm's
+   wind field is. MATTHEW-16 shows a 2x difference because its wind
+   field was highly lopsided.
+
+3. **Spatial attribution method.** Our reconstruction counts population
+   at the grid-cell level (mask raster pixels inside the wind polygon).
+   GDACS attributes population at the admin-unit level, counting the
+   *entire admin unit's population* if it intersects the wind polygon.
+   This explains cases where GDACS `pop_affected` exceeds the admin
+   unit's actual population.
+
+When reconstructing exposure for the 2016--2021 gap, these choices
+should be made deliberately. Using GHSL E2025 + symmetric method +
+grid-cell attribution gives the closest match to current GDACS figures.
 
 ## GDACS Methodology Summary
 
