@@ -47,8 +47,11 @@ from src.gdacs_monitor_email import (  # noqa: E402
 load_dotenv()
 
 TEST_LIST_ID = 25
-SUBJECT_PREFIX = "[test]"  # triggers the test-variant template on the
-                          # OCHA Listmonk instance. Drop when going prod.
+TEST_PREFIX = "[test] "  # Prefixed onto BOTH the campaign name and the
+                         # subject. The name-prefix triggers OCHA Listmonk's
+                         # test-variant template (Go side); the subject
+                         # prefix lets recipients filter test mails into a
+                         # dedicated inbox folder. Drop to "" for prod.
 DRY_RUN_DIR = Path(__file__).parent.parent / "artefacts" / "daily_email_previews"
 
 
@@ -122,6 +125,15 @@ def main():
         default=TEST_LIST_ID,
         help=f"Listmonk list ID to target (default: {TEST_LIST_ID}).",
     )
+    parser.add_argument(
+        "--auto-send",
+        action="store_true",
+        help=(
+            "Skip ocha-relay's interactive confirmation prompt. Required "
+            "for headless GHA use; locally, omit to get the standard "
+            "type-the-campaign-name confirmation."
+        ),
+    )
     args = parser.parse_args()
 
     now = datetime.now(tz=timezone.utc)
@@ -135,7 +147,7 @@ def main():
         print("Step 2: no active storms — stub email.", flush=True)
         html = build_stub_html(now)
         subject = (
-            f"{SUBJECT_PREFIX} GDACS Monitor {now:%Y-%m-%d %H%M}Z:"
+            f"{TEST_PREFIX}GDACS Monitor {now:%Y-%m-%d %H%M}Z:"
             " no active storms"
         )
     else:
@@ -151,7 +163,7 @@ def main():
         html = build_email_html(active, exposure, historical, now)
         names = ", ".join(active["name"].tolist())
         subject = (
-            f"{SUBJECT_PREFIX} GDACS Monitor {now:%Y-%m-%d %H%M}Z: {names}"
+            f"{TEST_PREFIX}GDACS Monitor {now:%Y-%m-%d %H%M}Z: {names}"
         )
 
     if args.dry_run:
@@ -163,7 +175,7 @@ def main():
         return
 
     client = ListmonkClient.from_env()
-    campaign_name = f"gdacs-monitor-{now:%Y%m%dT%H%MZ}"
+    campaign_name = f"{TEST_PREFIX}gdacs-monitor-{now:%Y%m%dT%H%MZ}"
 
     if args.inspect:
         print("Step 4 (inspect): create draft campaign...", flush=True)
@@ -196,7 +208,7 @@ def main():
         list_ids=[args.list_id],
     )
     print(f"  created campaign id={cid} name={campaign_name!r}", flush=True)
-    client.send_campaign(cid, skip_confirmation=True)
+    client.send_campaign(cid, skip_confirmation=args.auto_send)
     print(f"  sent campaign id={cid}", flush=True)
 
 

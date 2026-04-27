@@ -43,6 +43,9 @@ jobs:
           ARGS=""
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
             ARGS="$ARGS --dry-run"
+          else
+            # Headless: skip ocha-relay's interactive prompt.
+            ARGS="$ARGS --auto-send"
           fi
           if [ -n "${{ github.event.inputs.list_id }}" ]; then
             ARGS="$ARGS --list-id ${{ github.event.inputs.list_id }}"
