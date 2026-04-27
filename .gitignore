@@ -5,6 +5,7 @@ book/_freeze/
 book/_cache/
 data/
 __pycache__/
+app/__marimo__/
 *.pyc
 .ipynb_checkpoints/
 artefacts/
