@@ -1,0 +1,39 @@
+execute:
+  freeze: auto
+
+project:
+  type: book
+  output-dir: _output
+
+book:
+  title: "Storm Impact Harmonisation"
+  subtitle: "Linking CERF allocations with cyclone population exposure"
+  author: "**OCHA Data Science Unit:** Arno Z., Downing T., Ker H., Ndirangu P., Martini G., Milano L."
+  sidebar:
+    logo: logo_white.png
+  chapters:
+    - index.qmd
+    - part: "CERF Predictions"
+      chapters:
+        - 02b-analysis-cerf-api.qmd
+        - 02c-analysis-inform.qmd
+    - part: "Monitoring Pipeline Exploration"
+      chapters:
+        - 03-gdacs-realtime.qmd
+        - 06-gdacs-episodes.qmd
+        - 04-nhc-wsp-exploration.qmd
+        - 05-gdacs-nhc-matching.qmd
+    - part: "Exposure Method Comparison"
+      chapters:
+        - 07-exposure-method-comparison.qmd
+    - part: "Appendices"
+      chapters:
+        - 01-data-merge.qmd
+        - 03-appendix-adam-gdacs.qmd
+
+format:
+  html:
+    theme: cosmo
+    toc: true
+    code-fold: true
+    css: custom.css

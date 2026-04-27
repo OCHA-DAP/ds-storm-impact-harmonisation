@@ -1,0 +1,1364 @@
+---
+title: "TC Windspeed & 3RM Replication"
+jupyter: ds-storm-impact
+---
+
+::: {.callout-note appearance="simple"}
+## Summary
+
+We investigate whether cyclone population exposure (the number of people
+living in areas exposed to different wind speed thresholds) can inform CERF
+rapid-response allocation decisions for tropical cyclones. Using OCHA exposure
+estimates at 34, 50, and 64 kt thresholds matched to CERF storm allocations
+via IBTrACS, we address three objectives: **(1)** whether exposure alone
+predicts CERF allocation amounts; **(2)** whether exposure predicts other
+3RM outcome variables (funding required, people targeted, people affected);
+and **(3)** whether adding exposure to the Rost (2025) 3RM regression model
+improves its fit for storm allocations.
+
+Results differ substantially by period. Over the full record (2006--2024),
+correlations between exposure and allocation amounts are weak and mostly
+non-significant. From **2016 onward** (the 3RM period), correlations
+strengthen, with the 64 kt threshold showing the strongest relationship
+(r² ≈ 0.19--0.43 depending on outlier treatment). However, even where
+statistically significant, these low R² values mean exposure explains only
+a small fraction of the variance in allocation amounts, limiting its
+practical predictive utility. Exposure also significantly predicts
+funding required and people affected in bivariate regressions (Objective 2),
+though again with modest explained variance. When added to the full 3RM
+model (Objective 3), exposure does not significantly improve fit in any
+specification. CIRV (the vulnerability index) is not significant for
+storm-only allocations. Small sample sizes (n = 29--40) constrain
+statistical power throughout.
+:::
+
+```{python}
+#| label: setup
+#| output: false
+import sys
+sys.path.insert(0, "..")
+
+import ocha_stratus as stratus
+import pandas as pd
+import numpy as np
+from io import BytesIO
+from scipy import stats as sp_stats
+from great_tables import GT, loc, style
+from plotnine import *
+import warnings
+from dotenv import load_dotenv
+
+warnings.filterwarnings("ignore", module="plotnine")
+
+load_dotenv()
+
+from src.datasets.cerf import (
+    build_analysis_dataset_api,
+    remove_col_outliers_iqr,
+)
+
+df_ocha = stratus.load_parquet_from_blob(
+    "ds-storm-impact-harmonisation/processed/adm0_ibtracs_exp_all.parquet"
+)
+
+merged_agg = build_analysis_dataset_api(df_ocha)
+
+# Storm name lookup
+engine = stratus.get_engine("prod")
+all_sids = sorted(merged_agg["sid"].unique())
+with engine.connect() as conn:
+    _sid_names = pd.read_sql(
+        f"SELECT sid, name FROM storms.ibtracs_storms "
+        f"WHERE sid IN ({','.join(repr(s) for s in all_sids)})",
+        conn,
+    )
+sid_name_map = dict(zip(_sid_names["sid"], _sid_names["name"]))
+merged_agg["storm_name"] = merged_agg["sid"].map(sid_name_map)
+
+print(f"Storm-country pairs: {len(merged_agg)}")
+print(f"Unique storms: {merged_agg['sid'].nunique()}")
+print(f"Year range: {int(merged_agg['allocation_year'].min())}–{int(merged_agg['allocation_year'].max())}")
+print(f"Total CERF: ${merged_agg['total_usd'].sum():,.0f}")
+```
+
+## Preliminary: Distributions & Outliers
+
+All variables are heavily right-skewed; log transformation is applied
+throughout. Outliers are identified independently per wind speed column
+using the IQR method on log₁₀-transformed values (Q1 − 2×IQR / Q3 + 2×IQR).
+
+```{python}
+#| label: distributions
+#| fig-cap: "Distributions of key variables on raw and log scales. Raw data is heavily right-skewed; log transformation improves normality."
+dist_rows = []
+for col, label in [
+    ("total_usd", "CERF Allocation (USD)"),
+    ("pop_exp_34kt", "Pop Exposed ≥ 34 kt"),
+    ("pop_exp_64kt", "Pop Exposed ≥ 64 kt"),
+]:
+    vals = merged_agg[col].dropna()
+    vals = vals[vals > 0]
+    for v in vals:
+        dist_rows.append({"panel": f"{label} — Raw", "value": v, "scale": "Raw", "variable": label})
+        dist_rows.append({"panel": f"{label} — Log₁₀", "value": np.log10(v), "scale": "Log₁₀", "variable": label})
+
+dist_df = pd.DataFrame(dist_rows)
+var_names = ["CERF Allocation (USD)", "Pop Exposed ≥ 34 kt", "Pop Exposed ≥ 64 kt"]
+panel_order = [f"{v} — Raw" for v in var_names] + [f"{v} — Log₁₀" for v in var_names]
+dist_df["panel"] = pd.Categorical(dist_df["panel"], categories=panel_order, ordered=True)
+
+(
+    ggplot(dist_df, aes("value"))
+    + geom_histogram(bins=20, fill="#4292c6", color="#666666", alpha=0.8)
+    + facet_wrap("~panel", scales="free", ncol=3)
+    + labs(x="", y="Count", title="Distribution of Key Variables")
+    + theme_minimal()
+    + theme(figure_size=(14, 8))
+)
+```
+
+```{python}
+#| label: normality-tests
+test_rows = []
+for col, label in [
+    ("total_usd", "CERF Allocation"),
+    ("pop_exp_34kt", "Pop ≥ 34 kt"),
+    ("pop_exp_50kt", "Pop ≥ 50 kt"),
+    ("pop_exp_64kt", "Pop ≥ 64 kt"),
+]:
+    vals = merged_agg[col].dropna()
+    vals = vals[vals > 0]
+    if len(vals) < 8:
+        continue
+
+    sw_stat, sw_p = sp_stats.shapiro(vals)
+    sw_stat_log, sw_p_log = sp_stats.shapiro(np.log10(vals))
+
+    test_rows.append({
+        "Variable": label,
+        "n": len(vals),
+        "Shapiro-Wilk (raw)": f"{sw_stat:.3f}",
+        "p-value (raw)": f"{sw_p:.4f}",
+        "Normal? (raw)": "Yes" if sw_p > 0.05 else "No",
+        "Shapiro-Wilk (log)": f"{sw_stat_log:.3f}",
+        "p-value (log)": f"{sw_p_log:.4f}",
+        "Normal? (log)": "Yes" if sw_p_log > 0.05 else "No",
+    })
+
+normality_df = pd.DataFrame(test_rows)
+
+(
+    GT(normality_df)
+    .tab_header(
+        title="Shapiro-Wilk Normality Tests",
+        subtitle="p > 0.05 indicates data is consistent with a normal distribution",
+    )
+    .tab_style(
+        style=style.fill(color="#f4cccc"),
+        locations=loc.body(
+            columns="Normal? (raw)",
+            rows=normality_df.index[normality_df["Normal? (raw)"] == "No"].tolist(),
+        ),
+    )
+    .tab_style(
+        style=style.fill(color="#d9ead3"),
+        locations=loc.body(
+            columns="Normal? (log)",
+            rows=normality_df.index[normality_df["Normal? (log)"] == "Yes"].tolist(),
+        ),
+    )
+    .tab_style(
+        style=style.fill(color="#f4cccc"),
+        locations=loc.body(
+            columns="Normal? (log)",
+            rows=normality_df.index[normality_df["Normal? (log)"] == "No"].tolist(),
+        ),
+    )
+    .tab_source_note("Shapiro-Wilk test: H₀ = data is normally distributed")
+)
+```
+
+```{python}
+#| label: outlier-detection
+print("Outliers per exposure column (IQR × 2 on log₁₀ scale):\n")
+for col, label in [
+    ("pop_exp_34kt", "≥ 34 kt"),
+    ("pop_exp_50kt", "≥ 50 kt"),
+    ("pop_exp_64kt", "≥ 64 kt"),
+]:
+    _, col_outliers = remove_col_outliers_iqr(merged_agg, col)
+    print(f"  {label}: {len(col_outliers)} outlier(s)")
+    for _, row in col_outliers.iterrows():
+        storm = sid_name_map.get(row.get("sid", ""), "Unknown")
+        print(
+            f"    → {row['Country']} ({row['iso3']}, {storm}): "
+            f"{col}={row[col]:,.0f}, CERF=${row['total_usd']:,.0f}"
+        )
+```
+
+```{python}
+#| label: normality-after-outliers
+test_rows_clean = []
+for col, label in [
+    ("total_usd", "CERF Allocation"),
+    ("pop_exp_34kt", "Pop ≥ 34 kt"),
+    ("pop_exp_50kt", "Pop ≥ 50 kt"),
+    ("pop_exp_64kt", "Pop ≥ 64 kt"),
+]:
+    if col == "total_usd":
+        vals = merged_agg["total_usd"].dropna()
+        vals = vals[vals > 0]
+    else:
+        clean, _ = remove_col_outliers_iqr(merged_agg, col)
+        vals = clean[col]
+
+    if len(vals) < 8:
+        continue
+    sw_stat_log, sw_p_log = sp_stats.shapiro(np.log10(vals))
+    test_rows_clean.append({
+        "Variable": label,
+        "n": len(vals),
+        "Shapiro-Wilk (log)": f"{sw_stat_log:.3f}",
+        "p-value (log)": f"{sw_p_log:.4f}",
+        "Normal? (log)": "Yes" if sw_p_log > 0.05 else "No",
+    })
+
+normality_clean_df = pd.DataFrame(test_rows_clean)
+
+(
+    GT(normality_clean_df)
+    .tab_header(
+        title="Shapiro-Wilk Tests After Per-Column Outlier Removal",
+        subtitle="Each exposure column tested after removing its own outliers only",
+    )
+    .tab_style(
+        style=style.fill(color="#d9ead3"),
+        locations=loc.body(
+            columns="Normal? (log)",
+            rows=normality_clean_df.index[
+                normality_clean_df["Normal? (log)"] == "Yes"
+            ].tolist(),
+        ),
+    )
+    .tab_style(
+        style=style.fill(color="#f4cccc"),
+        locations=loc.body(
+            columns="Normal? (log)",
+            rows=normality_clean_df.index[
+                normality_clean_df["Normal? (log)"] == "No"
+            ].tolist(),
+        ),
+    )
+    .tab_source_note(
+        "Each exposure variable tested after removing only that column's "
+        "IQR outliers. CERF allocation is unchanged (no exposure outlier removal)."
+    )
+)
+```
+
+After per-column outlier removal, log-transformed distributions pass the
+Shapiro-Wilk test, supporting **Pearson correlation on the log scale** in
+addition to the distribution-free **Spearman rank correlation**.
+
+## Objective 1: Predicting CERF Allocations from Exposure
+
+Can cyclone population exposure alone predict how much CERF allocates to a
+storm-affected country? We test this with bivariate correlations and OLS
+regressions at three wind speed thresholds.
+
+```{python}
+#| label: prepare-subsets
+#| output: false
+merged_all = merged_agg.copy()
+merged_2016 = merged_agg[merged_agg["allocation_year"] >= 2016].copy()
+
+exp_meta = [
+    ("pop_exp_34kt", "≥ 34 kt"),
+    ("pop_exp_50kt", "≥ 50 kt"),
+    ("pop_exp_64kt", "≥ 64 kt"),
+]
+
+
+def build_scatter_df(data):
+    """Reshape to long format for plotnine, flagging per-column outliers."""
+    frames = []
+    for col, label in exp_meta:
+        sub = data.dropna(subset=[col])
+        sub = sub[(sub[col] > 0) & (sub["total_usd"] > 0)]
+        _, outliers = remove_col_outliers_iqr(data, col)
+        frame = sub[["Country", "total_usd"]].copy()
+        frame["threshold"] = label
+        frame["pop_exposed"] = sub[col]
+        frame["is_outlier"] = frame.index.isin(outliers.index)
+        frames.append(frame)
+    df = pd.concat(frames, ignore_index=True)
+    df["threshold"] = pd.Categorical(
+        df["threshold"], categories=[l for _, l in exp_meta], ordered=True
+    )
+    return df
+
+
+def build_annot_df(data):
+    """Compute OLS r² and p-value annotations per facet."""
+    rows = []
+    for col, label in exp_meta:
+        sub = data.dropna(subset=[col])
+        sub = sub[(sub[col] > 0) & (sub["total_usd"] > 0)]
+        log_x = np.log10(sub[col].values)
+        log_y = np.log10(sub["total_usd"].values)
+        if len(log_x) > 2:
+            _, _, r, p, _ = sp_stats.linregress(log_x, log_y)
+            rows.append({
+                "threshold": label,
+                "label": f"r²={r**2:.3f}, p={p:.4f}",
+                "pop_exposed": 10 ** (log_x.min() + 0.05 * (log_x.max() - log_x.min())),
+                "total_usd": 10 ** (log_y.max() - 0.05 * (log_y.max() - log_y.min())),
+            })
+    df = pd.DataFrame(rows)
+    df["threshold"] = pd.Categorical(
+        df["threshold"], categories=[l for _, l in exp_meta], ordered=True
+    )
+    return df
+```
+
+::: {.panel-tabset}
+
+### All Data
+
+```{python}
+#| label: scatter-all
+#| fig-cap: "All matched allocations: log-log scatter with OLS regression and 95% CI. Red circles mark outliers (per-column IQR on log scale)."
+plot_df = build_scatter_df(merged_all)
+annot_df = build_annot_df(merged_all)
+outlier_df = plot_df[plot_df["is_outlier"]]
+
+p = (
+    ggplot(plot_df, aes("pop_exposed", "total_usd"))
+    + geom_point(color="#4292c6", size=3, alpha=0.6)
+    + (
+        geom_point(
+            data=outlier_df,
+            color="red", size=5, stroke=1.5, shape="o", fill="none",
+        )
+        if len(outlier_df) > 0
+        else geom_blank()
+    )
+    + geom_smooth(method="lm", se=True, color="red", fill="red", alpha=0.15)
+    + geom_label(
+        data=annot_df, mapping=aes(label="label"),
+        ha="left", va="top", size=8, fill="white", alpha=0.8,
+    )
+    + scale_x_log10()
+    + scale_y_log10()
+    + facet_wrap("~threshold", scales="free")
+    + labs(
+        x="Population Exposed",
+        y="CERF Allocation (USD)",
+        title="All Data — Log Scale with OLS",
+    )
+    + theme_minimal()
+    + theme(figure_size=(16, 5))
+)
+p
+```
+
+```{python}
+#| label: corr-all
+corr_rows_all = []
+for col, label in exp_meta:
+    full = merged_all.dropna(subset=[col])
+    full = full[(full[col] > 0) & (full["total_usd"] > 0)]
+
+    clean, _ = remove_col_outliers_iqr(merged_all, col)
+
+    for dset_label, subset in [("All data", full), ("Outliers removed", clean)]:
+        if len(subset) < 3:
+            continue
+        r_log, p_log = sp_stats.pearsonr(
+            np.log10(subset[col]), np.log10(subset["total_usd"])
+        )
+        rho, p_rho = sp_stats.spearmanr(subset[col], subset["total_usd"])
+        corr_rows_all.append({
+            "Threshold": label,
+            "Dataset": dset_label,
+            "n": len(subset),
+            "r² (log)": f"{r_log**2:.3f}",
+            "p (Pearson)": f"{p_log:.4f}",
+            "Spearman rho": f"{rho:.3f}",
+            "p (Spear.)": f"{p_rho:.4f}",
+        })
+corr_all_df = pd.DataFrame(corr_rows_all)
+
+gt_all = (
+    GT(corr_all_df)
+    .tab_header(
+        title="Correlation — All Data (CERF API)",
+        subtitle="r² (log) matches scatter plot annotations; both full and cleaned data shown",
+    )
+    .tab_spanner(label="Pearson (log₁₀)", columns=["r² (log)", "p (Pearson)"])
+    .tab_spanner(label="Spearman (rank)", columns=["Spearman rho", "p (Spear.)"])
+)
+
+clean_idx = corr_all_df.index[
+    corr_all_df["Dataset"] == "Outliers removed"
+].tolist()
+if clean_idx:
+    gt_all = gt_all.tab_style(
+        style=style.fill(color="#f0f7f0"),
+        locations=loc.body(rows=clean_idx),
+    )
+
+gt_all.tab_source_note(
+    "r² = Pearson r squared on log₁₀ values (same statistic shown in scatter plots). "
+    "Green rows = per-column IQR outliers removed."
+)
+```
+
+### 2016+ (3RM Period)
+
+Rost (2025) uses CERF allocations from 2016 onward for the 3RM model.
+Filtering to this period substantially strengthens the exposure--allocation
+relationship.
+
+```{python}
+#| label: scatter-2016
+#| fig-cap: "2016+ allocations only: log-log scatter. Correlations are markedly stronger than the full time series."
+plot_df = build_scatter_df(merged_2016)
+annot_df = build_annot_df(merged_2016)
+outlier_df = plot_df[plot_df["is_outlier"]]
+
+p = (
+    ggplot(plot_df, aes("pop_exposed", "total_usd"))
+    + geom_point(color="#4292c6", size=3, alpha=0.6)
+    + (
+        geom_point(
+            data=outlier_df,
+            color="red", size=5, stroke=1.5, shape="o", fill="none",
+        )
+        if len(outlier_df) > 0
+        else geom_blank()
+    )
+    + geom_smooth(method="lm", se=True, color="red", fill="red", alpha=0.15)
+    + geom_label(
+        data=annot_df, mapping=aes(label="label"),
+        ha="left", va="top", size=8, fill="white", alpha=0.8,
+    )
+    + scale_x_log10()
+    + scale_y_log10()
+    + facet_wrap("~threshold", scales="free")
+    + labs(
+        x="Population Exposed",
+        y="CERF Allocation (USD)",
+        title="2016+ Allocations — Log Scale with OLS",
+    )
+    + theme_minimal()
+    + theme(figure_size=(16, 5))
+)
+p
+```
+
+```{python}
+#| label: corr-2016
+corr_rows_2016 = []
+for col, label in exp_meta:
+    full = merged_2016.dropna(subset=[col])
+    full = full[(full[col] > 0) & (full["total_usd"] > 0)]
+
+    clean, _ = remove_col_outliers_iqr(merged_2016, col)
+
+    for dset_label, subset in [("All data", full), ("Outliers removed", clean)]:
+        if len(subset) < 3:
+            continue
+        r_log, p_log = sp_stats.pearsonr(
+            np.log10(subset[col]), np.log10(subset["total_usd"])
+        )
+        rho, p_rho = sp_stats.spearmanr(subset[col], subset["total_usd"])
+        corr_rows_2016.append({
+            "Threshold": label,
+            "Dataset": dset_label,
+            "n": len(subset),
+            "r² (log)": f"{r_log**2:.3f}",
+            "p (Pearson)": f"{p_log:.4f}",
+            "Spearman rho": f"{rho:.3f}",
+            "p (Spear.)": f"{p_rho:.4f}",
+        })
+corr_2016_df = pd.DataFrame(corr_rows_2016)
+
+gt_2016 = (
+    GT(corr_2016_df)
+    .tab_header(
+        title="Correlation — 2016+ (3RM Period)",
+        subtitle="Restricted to allocations from 2016 onward, aligned with Rost (2025)",
+    )
+    .tab_spanner(label="Pearson (log₁₀)", columns=["r² (log)", "p (Pearson)"])
+    .tab_spanner(label="Spearman (rank)", columns=["Spearman rho", "p (Spear.)"])
+)
+
+clean_idx = corr_2016_df.index[
+    corr_2016_df["Dataset"] == "Outliers removed"
+].tolist()
+if clean_idx:
+    gt_2016 = gt_2016.tab_style(
+        style=style.fill(color="#f0f7f0"),
+        locations=loc.body(rows=clean_idx),
+    )
+
+gt_2016.tab_source_note(
+    "r² = Pearson r squared on log₁₀ values (same statistic shown in scatter plots). "
+    "Green rows = per-column IQR outliers removed."
+)
+```
+
+:::
+
+### Exposure + CIRV
+
+Does adding CIRV (the vulnerability index from Rost 2025) improve the
+exposure-only model? This tests whether country-level vulnerability explains
+allocation variance beyond what storm severity captures.
+
+```{python}
+#| label: cirv-setup
+#| output: false
+import statsmodels.api as sm
+from src.datasets.cerf import load_3rm_cirv, load_cerf_api_data, apply_cerfcode_sids
+
+# Load CIRV from blob (3RM dataset) and join via ApplicationCode
+df_3rm = load_3rm_cirv()
+cirv_map = dict(zip(df_3rm["ApplicationCode"], df_3rm["CIRV"]))
+
+# Get ApplicationCode -> (sid, iso3) from our pipeline to bridge the join
+df_api_raw = load_cerf_api_data()
+df_api_matched = apply_cerfcode_sids(df_api_raw)
+df_api_matched["CIRV"] = df_api_matched["ApplicationCode"].map(cirv_map)
+
+# Build sid+iso3 -> CIRV lookup (CIRV is constant per country-year,
+# so taking first value per group is safe)
+cirv_by_pair = (
+    df_api_matched.dropna(subset=["sid", "CIRV"])
+    .groupby(["sid", "iso3"])["CIRV"]
+    .first()
+    .reset_index()
+)
+
+merged_cirv = merged_agg.merge(cirv_by_pair, on=["sid", "iso3"], how="left")
+print(f"CIRV coverage: {merged_cirv['CIRV'].notna().sum()} of {len(merged_cirv)} rows")
+
+# Filter to rows with CIRV available and positive allocation
+merged_cirv_pos = merged_cirv[merged_cirv["total_usd"] > 0].copy()
+
+# Build per-threshold regression datasets (all data and outlier-removed)
+reg_data = {}
+for col, label in exp_meta:
+    sub = merged_cirv_pos.dropna(subset=[col, "CIRV"])
+    sub = sub[sub[col] > 0].copy()
+    sub["log_exp"] = np.log10(sub[col])
+    sub["log_usd"] = np.log10(sub["total_usd"])
+    sub["log_cirv"] = np.log10(sub["CIRV"])
+    clean, outliers = remove_col_outliers_iqr(sub, col)
+    clean["log_exp"] = np.log10(clean[col])
+    clean["log_usd"] = np.log10(clean["total_usd"])
+    clean["log_cirv"] = np.log10(clean["CIRV"])
+    reg_data[label] = {"all": sub, "clean": clean, "outliers": outliers, "col": col}
+```
+
+```{python}
+#| label: cirv-scatter
+#| fig-cap: "CERF allocation vs population exposure at each wind speed threshold, coloured by CIRV score. Red circles mark IQR outliers on log exposure."
+scatter_frames = []
+outlier_frames = []
+for label, rd in reg_data.items():
+    frame = rd["all"][["Country", "total_usd", "CIRV"]].copy()
+    frame["threshold"] = label
+    frame["pop_exposed"] = rd["all"][rd["col"]]
+    scatter_frames.append(frame)
+    if len(rd["outliers"]) > 0:
+        oframe = rd["outliers"][["Country", "total_usd", "CIRV"]].copy()
+        oframe["threshold"] = label
+        oframe["pop_exposed"] = rd["outliers"][rd["col"]]
+        outlier_frames.append(oframe)
+
+scatter_df = pd.concat(scatter_frames, ignore_index=True)
+scatter_df["threshold"] = pd.Categorical(
+    scatter_df["threshold"], categories=[l for _, l in exp_meta], ordered=True
+)
+outlier_df_cirv = pd.concat(outlier_frames, ignore_index=True) if outlier_frames else pd.DataFrame()
+if len(outlier_df_cirv) > 0:
+    outlier_df_cirv["threshold"] = pd.Categorical(
+        outlier_df_cirv["threshold"], categories=[l for _, l in exp_meta], ordered=True
+    )
+
+(
+    ggplot(scatter_df, aes("pop_exposed", "total_usd", color="CIRV"))
+    + geom_point(size=3, alpha=0.8)
+    + (
+        geom_point(
+            data=outlier_df_cirv,
+            color="red", size=5, stroke=1.5, shape="o", fill="none",
+        )
+        if len(outlier_df_cirv) > 0
+        else geom_blank()
+    )
+    + geom_smooth(method="lm", se=True, color="red", fill="red", alpha=0.15)
+    + scale_x_log10()
+    + scale_y_log10()
+    + scale_color_gradient(low="#fee8c8", high="#b30000", name="CIRV")
+    + facet_wrap("~threshold", scales="free")
+    + labs(
+        x="Population Exposed",
+        y="CERF Allocation (USD)",
+        title="Exposure vs Allocation — Coloured by CIRV (2016+)",
+    )
+    + theme_minimal()
+    + theme(figure_size=(16, 5))
+)
+```
+
+```{python}
+#| label: cirv-regression-table
+model_rows = []
+
+for label, rd in reg_data.items():
+    df_all = rd["all"]
+    df_clean = rd["clean"]
+
+    # Exposure only
+    X1 = sm.add_constant(df_all[["log_exp"]])
+    m1 = sm.OLS(df_all["log_usd"], X1).fit()
+    model_rows.append({
+        "Threshold": label,
+        "Model": "Exposure only",
+        "n": int(m1.nobs),
+        "R²": f"{m1.rsquared:.3f}",
+        "Adj R²": f"{m1.rsquared_adj:.3f}",
+        "p (exposure)": f"{m1.pvalues['log_exp']:.4f}",
+        "p (CIRV)": "—",
+    })
+
+    # CIRV only
+    X2 = sm.add_constant(df_all[["log_cirv"]])
+    m2 = sm.OLS(df_all["log_usd"], X2).fit()
+    model_rows.append({
+        "Threshold": label,
+        "Model": "CIRV only",
+        "n": int(m2.nobs),
+        "R²": f"{m2.rsquared:.3f}",
+        "Adj R²": f"{m2.rsquared_adj:.3f}",
+        "p (exposure)": "—",
+        "p (CIRV)": f"{m2.pvalues['log_cirv']:.4f}",
+    })
+
+    # Exposure + CIRV
+    X3 = sm.add_constant(df_all[["log_exp", "log_cirv"]])
+    m3 = sm.OLS(df_all["log_usd"], X3).fit()
+    model_rows.append({
+        "Threshold": label,
+        "Model": "Exposure + CIRV",
+        "n": int(m3.nobs),
+        "R²": f"{m3.rsquared:.3f}",
+        "Adj R²": f"{m3.rsquared_adj:.3f}",
+        "p (exposure)": f"{m3.pvalues['log_exp']:.4f}",
+        "p (CIRV)": f"{m3.pvalues['log_cirv']:.4f}",
+    })
+
+    # Exposure only (outliers removed)
+    if len(df_clean) >= 5:
+        X4a = sm.add_constant(df_clean[["log_exp"]])
+        m4a = sm.OLS(df_clean["log_usd"], X4a).fit()
+        model_rows.append({
+            "Threshold": label,
+            "Model": "Exposure only (outliers removed)",
+            "n": int(m4a.nobs),
+            "R²": f"{m4a.rsquared:.3f}",
+            "Adj R²": f"{m4a.rsquared_adj:.3f}",
+            "p (exposure)": f"{m4a.pvalues['log_exp']:.4f}",
+            "p (CIRV)": "—",
+        })
+
+    # Exposure + CIRV (outliers removed)
+    if len(df_clean) >= 5:
+        X4 = sm.add_constant(df_clean[["log_exp", "log_cirv"]])
+        m4 = sm.OLS(df_clean["log_usd"], X4).fit()
+        model_rows.append({
+            "Threshold": label,
+            "Model": "Exposure + CIRV (outliers removed)",
+            "n": int(m4.nobs),
+            "R²": f"{m4.rsquared:.3f}",
+            "Adj R²": f"{m4.rsquared_adj:.3f}",
+            "p (exposure)": f"{m4.pvalues['log_exp']:.4f}",
+            "p (CIRV)": f"{m4.pvalues['log_cirv']:.4f}",
+        })
+
+model_df = pd.DataFrame(model_rows)
+
+combined_idx = model_df.index[model_df["Model"] == "Exposure + CIRV"].tolist()
+clean_idx = model_df.index[model_df["Model"].str.contains("outliers removed")].tolist()
+
+(
+    GT(model_df)
+    .tab_header(
+        title="OLS Regression Comparison (2016+)",
+        subtitle="Dependent variable: log₁₀(CERF allocation USD)",
+    )
+    .tab_spanner(label="Fit", columns=["R²", "Adj R²"])
+    .tab_spanner(label="Significance", columns=["p (exposure)", "p (CIRV)"])
+    .tab_style(
+        style=style.fill(color="#e6eeff"),
+        locations=loc.body(rows=combined_idx),
+    )
+    .tab_style(
+        style=style.fill(color="#f0f7f0"),
+        locations=loc.body(rows=clean_idx),
+    )
+    .tab_source_note(
+        "All variables log₁₀-transformed. CIRV from Rost (2025) 3RM dataset. "
+        "Blue rows = combined model. Green rows = combined with IQR outliers removed."
+    )
+)
+```
+
+**CIRV adds little on top of exposure** for storm allocations: at 64 kt with
+outliers removed, adding CIRV nudges R² up slightly while Adj R² decreases,
+and CIRV itself is not significant. Hazard-specific exposure captures more
+allocation-relevant information than the generic vulnerability index.
+
+## Objective 2: Predicting 3RM Outcome Variables from Exposure
+
+Beyond allocation amounts, the 3RM dataset contains other outcome variables
+that characterise crisis response. Can cyclone exposure predict these? We
+test bivariate regressions (exposure only) for three outcomes:
+
+- **Funding required** (`LogRequired`, ln total amount required)
+- **People targeted** (`LogTargeted`, ln total individuals targeted)
+- **People affected** (`Total Individuals Affected`, we apply ln-transform)
+
+Only TC allocations with matched exposure data are included (n = 40).
+
+```{python}
+#| label: 3rm-outcome-setup
+#| output: false
+from src.datasets.cerf import CERFCODE_TO_SID
+
+# Load full 3RM MergedData (not just CIRV)
+raw_3rm = stratus.load_blob_data(
+    "ds-storm-impact-harmonisation/raw/"
+    "CERF 3RM - RR Regression Model - version 1.8.xlsx"
+)
+df_3rm_full = pd.read_excel(BytesIO(raw_3rm), sheet_name="MergedData")
+df_3rm_full = df_3rm_full.rename(columns={"Application Code": "ApplicationCode"})
+
+# Keep only TC allocations
+tc_codes = {k for k, v in CERFCODE_TO_SID.items() if v is not None}
+df_3rm_tc = df_3rm_full[df_3rm_full["ApplicationCode"].isin(tc_codes)].copy()
+df_3rm_tc["sid"] = df_3rm_tc["ApplicationCode"].map(CERFCODE_TO_SID)
+
+# Get iso3 from CERF API data
+code_to_iso3 = dict(zip(df_api_matched["ApplicationCode"], df_api_matched["iso3"]))
+df_3rm_tc["iso3"] = df_3rm_tc["ApplicationCode"].map(code_to_iso3)
+
+# Merge with OCHA exposure
+from src.datasets.cerf import pivot_ocha_wide
+
+ocha_wide = pivot_ocha_wide(df_ocha)
+df_3rm_exp = df_3rm_tc.merge(ocha_wide, on=["sid", "iso3"], how="inner")
+
+# Add ln-transformed affected
+df_3rm_exp["LogAffected"] = np.log(
+    df_3rm_exp["Total Individuals Affected"].replace(0, np.nan)
+)
+
+print(f"TC allocations in 3RM with exposure data: {len(df_3rm_exp)}")
+for col in ["LogRequired", "LogTargeted", "LogAffected"]:
+    print(f"  {col}: {df_3rm_exp[col].notna().sum()} non-null")
+```
+
+```{python}
+#| label: 3rm-outcome-models
+outcome_meta = [
+    ("LogRequired", "ln(Funding Required)"),
+    ("LogTargeted", "ln(People Targeted)"),
+    ("LogAffected", "ln(People Affected)"),
+]
+
+model_rows_3rm = []
+for outcome_col, outcome_label in outcome_meta:
+    for exp_col, exp_label in exp_meta:
+        sub = df_3rm_exp.dropna(subset=[exp_col, outcome_col])
+        sub = sub[sub[exp_col] > 0].copy()
+        if len(sub) < 5:
+            continue
+        sub["log_exp"] = np.log(sub[exp_col])
+        X = sm.add_constant(sub[["log_exp"]])
+        m = sm.OLS(sub[outcome_col], X).fit()
+        model_rows_3rm.append({
+            "Outcome": outcome_label,
+            "Predictor": f"ln(Pop {exp_label})",
+            "n": int(m.nobs),
+            "R²": round(m.rsquared, 3),
+            "Adj R²": round(m.rsquared_adj, 3),
+            "β (exposure)": round(m.params["log_exp"], 3),
+            "p (exposure)": round(m.pvalues["log_exp"], 4),
+        })
+
+model_3rm_df = pd.DataFrame(model_rows_3rm)
+
+sig_idx = model_3rm_df.index[model_3rm_df["p (exposure)"] < 0.05].tolist()
+
+(
+    GT(model_3rm_df)
+    .tab_header(
+        title="OLS: Cyclone Exposure → 3RM Outcomes (TC Allocations Only)",
+        subtitle="Each row is a separate bivariate regression. All variables ln-transformed.",
+    )
+    .tab_spanner(label="Fit", columns=["R²", "Adj R²"])
+    .tab_spanner(label="Exposure coefficient", columns=["β (exposure)", "p (exposure)"])
+    .tab_style(
+        style=style.fill(color="#d9ead3"),
+        locations=loc.body(rows=sig_idx),
+    )
+    .tab_source_note(
+        "Green rows: p < 0.05. β = elasticity: a 1% increase in exposed "
+        "population is associated with a β% change in the outcome."
+    )
+)
+```
+
+```{python}
+#| label: 3rm-outcome-scatter
+#| fig-cap: "Cyclone population exposure vs 3RM outcomes (TC allocations only). Each column is a wind speed threshold; each row is an outcome variable."
+scatter_rows = []
+for outcome_col, outcome_label in outcome_meta:
+    for exp_col, exp_label in exp_meta:
+        sub = df_3rm_exp.dropna(subset=[exp_col, outcome_col])
+        sub = sub[sub[exp_col] > 0].copy()
+        for _, row in sub.iterrows():
+            scatter_rows.append({
+                "outcome": outcome_label,
+                "threshold": exp_label,
+                "pop_exposed": row[exp_col],
+                "outcome_value": row[outcome_col],
+            })
+
+scatter_3rm = pd.DataFrame(scatter_rows)
+scatter_3rm["threshold"] = pd.Categorical(
+    scatter_3rm["threshold"],
+    categories=[l for _, l in exp_meta],
+    ordered=True,
+)
+scatter_3rm["outcome"] = pd.Categorical(
+    scatter_3rm["outcome"],
+    categories=[l for _, l in outcome_meta],
+    ordered=True,
+)
+
+(
+    ggplot(scatter_3rm, aes("pop_exposed", "outcome_value"))
+    + geom_point(color="#4292c6", size=2.5, alpha=0.7)
+    + geom_smooth(method="lm", se=True, color="red", fill="red", alpha=0.15)
+    + scale_x_log10()
+    + facet_grid("outcome ~ threshold", scales="free")
+    + labs(
+        x="Population Exposed (log scale)",
+        y="Outcome (ln-transformed)",
+        title="Exposure vs 3RM Outcomes — TC Allocations",
+    )
+    + theme_minimal()
+    + theme(figure_size=(14, 10))
+)
+```
+
+## Objective 3: Extending the 3RM Model with Exposure {#sec-3rm-extension}
+
+Rost (2025) presents a regression model (3RM) that predicts CERF allocation
+amounts using four factors: emergency type, CIRV, total funding required, and
+people targeted. The paper notes that hazard-specific severity data (such as
+cyclone wind speed) is not yet included. Here we test whether adding cyclone
+population exposure improves the model for storm allocations.
+
+### Replicating the Published Model
+
+We first verify that we can reproduce the published Model 1 coefficients using
+the 3RM dataset (v1.8). The paper used allocations from January 2016 -- July
+2024 (n = 378); our dataset has been updated since publication, yielding
+slightly more rows for the same period.
+
+```{python}
+#| label: 3rm-replicate
+#| output: false
+def _stars(p):
+    if p < 0.01:
+        return "***"
+    if p < 0.05:
+        return "**"
+    if p < 0.1:
+        return "*"
+    return ""
+
+def _fmt_coef(model, var):
+    """Format as coefficient with stars + p-value in parentheses."""
+    b = model.params[var]
+    p = model.pvalues[var]
+    return f"{b:.3f}{_stars(p)} ({p:.2f})"
+
+# Load full 3RM dataset (already loaded as df_3rm_full above)
+df_3rm_full["date"] = pd.to_datetime(df_3rm_full["Date of Most Recent Submission"])
+
+# Paper period: Jan 2016 – Jul 2024
+df_paper = df_3rm_full[df_3rm_full["date"] <= "2024-07-31"].copy()
+
+etype_cols = [
+    "Storm", "Flood", "Drought", "OtherNatural",
+    "Cholera", "Ebola", "OtherHealth", "DisplConfl",
+]
+base_3rm_vars = etype_cols + ["CIRV", "LogRequired", "LogTargeted"]
+```
+
+```{python}
+#| label: 3rm-replicate-table
+X_paper = sm.add_constant(df_paper[base_3rm_vars].astype(float))
+m_paper = sm.OLS(df_paper["LogApproved"], X_paper).fit()
+
+paper_coefs = {
+    "const": 8.43, "Storm": -0.28, "Flood": -0.30, "Drought": -0.24,
+    "OtherNatural": -0.32, "Cholera": -0.99, "Ebola": -0.71,
+    "OtherHealth": -1.39, "DisplConfl": -0.01, "CIRV": 0.01,
+    "LogRequired": 0.20, "LogTargeted": 0.25,
+}
+
+paper_pvals = {
+    "const": 0.00, "Storm": 0.12, "Flood": 0.09, "Drought": 0.18,
+    "OtherNatural": 0.11, "Cholera": 0.00, "Ebola": 0.00,
+    "OtherHealth": 0.00, "DisplConfl": 0.97, "CIRV": 0.00,
+    "LogRequired": 0.00, "LogTargeted": 0.00,
+}
+
+rep_rows = []
+for var in m_paper.params.index:
+    pc = paper_coefs.get(var, "—")
+    pp = paper_pvals.get(var, 1.0)
+    rep_rows.append({
+        "Variable": var.replace("const", "Intercept"),
+        "Rost (2025)": f"{pc}{_stars(pp)} ({pp:.2f})",
+        "Our replication": _fmt_coef(m_paper, var),
+    })
+rep_rows.append({"Variable": "n", "Rost (2025)": "378", "Our replication": str(int(m_paper.nobs))})
+rep_rows.append({"Variable": "Adj R²", "Rost (2025)": "0.71", "Our replication": f"{m_paper.rsquared_adj:.3f}"})
+
+(
+    GT(pd.DataFrame(rep_rows))
+    .tab_header(
+        title="3RM Model 1 Replication",
+        subtitle="Rost (2025) vs our reproduction using 3RM v1.8 (≤ Jul 2024)",
+    )
+    .tab_style(style=style.css("font-size: 0.85em;"), locations=loc.body())
+    .tab_style(style=style.css("font-size: 0.85em;"), locations=loc.column_labels())
+    .tab_source_note(
+        "Outcome: ln(CERF allocation). Base category: 'Other' emergency type. "
+        "*** p < 0.01, ** p < 0.05, * p < 0.1. "
+        "Small differences due to dataset updates since publication."
+    )
+)
+```
+
+Coefficients match closely. The 10-row difference reflects dataset updates
+(new allocations or corrections added to v1.8 after the paper was finalised).
+
+### Full Updated Dataset
+
+Running the same model specification on the complete v1.8 dataset
+(2016--2025):
+
+```{python}
+#| label: 3rm-full-update
+X_full = sm.add_constant(df_3rm_full[base_3rm_vars].astype(float))
+m_full = sm.OLS(df_3rm_full["LogApproved"], X_full).fit()
+
+update_rows = []
+for var in m_full.params.index:
+    update_rows.append({
+        "Variable": var.replace("const", "Intercept"),
+        "Paper period": _fmt_coef(m_paper, var),
+        "Full v1.8": _fmt_coef(m_full, var),
+    })
+update_rows.append({"Variable": "n", "Paper period": str(int(m_paper.nobs)), "Full v1.8": str(int(m_full.nobs))})
+update_rows.append({"Variable": "Adj R²", "Paper period": f"{m_paper.rsquared_adj:.3f}", "Full v1.8": f"{m_full.rsquared_adj:.3f}"})
+
+(
+    GT(pd.DataFrame(update_rows))
+    .tab_header(
+        title="3RM Model 1 — Paper Period vs Full Updated Dataset",
+        subtitle="Coefficient (p-value) for each specification",
+    )
+    .tab_style(style=style.css("font-size: 0.85em;"), locations=loc.body())
+    .tab_style(style=style.css("font-size: 0.85em;"), locations=loc.column_labels())
+    .tab_source_note(
+        "*** p < 0.01, ** p < 0.05, * p < 0.1. "
+        "Full v1.8 includes 2025 allocations added since publication."
+    )
+)
+```
+
+### Adding Cyclone Exposure to 3RM
+
+For the TC-only subset (Storm = 1) with matched exposure data, emergency
+type dummies are constant and drop out. We test two model families, each
+with and without CIRV (which is not significant for TC allocations):
+
+- **Model A**: People targeted included (full 3RM specification for storms)
+- **Model B**: People targeted excluded (mirroring Rost's Model 2 for
+  scenarios where targeting data is unavailable)
+
+```{python}
+#| label: 3rm-tc-exposure
+
+def build_model_table(base_vars, title, data):
+    """Build a variables-as-rows, models-as-columns comparison table."""
+    all_var_labels = [
+        ("const", "Intercept"),
+        ("CIRV", "CIRV"),
+        ("LogRequired", "Funding req. (ln)"),
+        ("LogTargeted", "People targeted (ln)"),
+        ("ln_exp", "Pop. exposed (ln)"),
+    ]
+
+    X_b = sm.add_constant(data[base_vars].astype(float))
+    m_base = sm.OLS(data["LogApproved"], X_b).fit()
+    models = {"Base": m_base}
+
+    for exp_col, exp_label in exp_meta:
+        sub = data.dropna(subset=[exp_col])
+        sub = sub[sub[exp_col] > 0].copy()
+        sub["ln_exp"] = np.log(sub[exp_col])
+        X_a = sm.add_constant(sub[base_vars + ["ln_exp"]].astype(float))
+        models[f"+ {exp_label}"] = sm.OLS(sub["LogApproved"], X_a).fit()
+
+    tbl_rows = []
+    for var_key, var_label in all_var_labels:
+        row = {"Variable": var_label}
+        for mname, m in models.items():
+            if var_key in m.params.index:
+                row[mname] = _fmt_coef(m, var_key)
+            elif var_key in base_vars or var_key == "ln_exp":
+                row[mname] = "—"
+            else:
+                row[mname] = ""
+        vals = [row[k] for k in models]
+        if all(v == "" for v in vals):
+            continue
+        tbl_rows.append(row)
+
+    n_row = {"Variable": "n"}
+    r2_row = {"Variable": "Adj R²"}
+    for mname, m in models.items():
+        n_row[mname] = str(int(m.nobs))
+        r2_row[mname] = f"{m.rsquared_adj:.3f}"
+    tbl_rows.extend([n_row, r2_row])
+
+    tbl_df = pd.DataFrame(tbl_rows)
+    exp_idx = tbl_df.index[tbl_df["Variable"] == "Pop. exposed (ln)"].tolist()
+
+    return (
+        GT(tbl_df)
+        .tab_header(title=title, subtitle="Coefficient (p-value)")
+        .tab_style(style=style.fill(color="#e6eeff"), locations=loc.body(rows=exp_idx))
+        .tab_style(style=style.css("font-size: 0.85em;"), locations=loc.body())
+        .tab_style(style=style.css("font-size: 0.85em;"), locations=loc.column_labels())
+        .tab_source_note(
+            "Outcome: ln(CERF allocation). Blue row = exposure variable. "
+            "*** p < 0.01, ** p < 0.05, * p < 0.1."
+        )
+    )
+```
+
+#### Model A: People targeted included
+
+```{python}
+#| label: 3rm-model-a1
+build_model_table(
+    ["CIRV", "LogRequired", "LogTargeted"],
+    "Model A1: With CIRV",
+    df_3rm_exp,
+)
+```
+
+```{python}
+#| label: 3rm-model-a2
+build_model_table(
+    ["LogRequired", "LogTargeted"],
+    "Model A2: Without CIRV",
+    df_3rm_exp,
+)
+```
+
+#### Model B: People targeted excluded
+
+Rost (2025) provides an alternative model (Model 2) for cases where the
+number of people targeted is not yet available. Removing LogTargeted weakens the base model, giving
+exposure more room to contribute.
+
+```{python}
+#| label: 3rm-model-b1
+build_model_table(
+    ["CIRV", "LogRequired"],
+    "Model B1: With CIRV",
+    df_3rm_exp,
+)
+```
+
+```{python}
+#| label: 3rm-model-b2
+build_model_table(
+    ["LogRequired"],
+    "Model B2: Without CIRV",
+    df_3rm_exp,
+)
+```
+
+#### Interpretation
+
+Several patterns emerge across the four specifications:
+
+- **CIRV is not significant for storms** in any specification. In the full
+  3RM (all emergency types, n ≈ 400), CIRV is highly significant because it
+  captures background vulnerability that varies greatly across emergency
+  types. Within TC-only allocations, CIRV adds nothing; dropping it
+  (A2 vs A1, B2 vs B1) leaves Adj R² essentially unchanged.
+- **Exposure shows the largest Adj R² gains when LogTargeted is absent**
+  (Model B). Without the people-targeted variable, the base model is weaker
+  and exposure has more room to explain variance. However, exposure
+  coefficients remain non-significant even in these simplified models.
+- **Adj R² can increase while the exposure p-value remains non-significant.**
+  R² mechanically increases whenever a predictor is added; Adj R² penalises
+  for the extra parameter but weakly at small n. The p-value tests whether
+  the coefficient is distinguishable from zero, and with only 29--40
+  observations, statistical power is low. A genuine but modest effect can
+  improve fit without reaching conventional significance. This is a sample
+  size limitation, not evidence of absence.
+- **LogRequired and LogTargeted dominate** when both are present. Countries
+  with more people in the path of a cyclone tend to submit larger funding
+  requests and target more beneficiaries, so these variables already absorb
+  much of the severity signal that exposure provides.
+
+In summary, while exposure captures meaningful variation in storm severity
+(as shown by its ability to predict LogRequired and Total Individuals
+Affected in Objective 2), it does not translate into significant predictive
+power for CERF allocation amounts, whether used alone or as an addition
+to the 3RM model.
+
+## Key Findings
+
+### Objective 1: Exposure → CERF allocation amounts
+
+- **Strongest signal at 64 kt**: Population exposed to >= 64 kt winds shows
+  the strongest correlation with CERF allocation amounts.
+- **Stronger signal from 2016 onward**: Restricting to the 3RM period
+  (2016+) strengthens correlations across all thresholds.
+- **Outlier removal matters**: Removing per-column IQR outliers substantially
+  improves exposure's predictive power and restores log-normality.
+- **CIRV adds little for storms**: Hazard-specific exposure captures more
+  allocation-relevant information than the generic vulnerability index.
+
+### Objective 2: Exposure → 3RM outcome variables
+
+- Wind-speed exposure significantly predicts **funding required** and
+  **people affected** for TC allocations, with the 64 kt threshold again
+  showing the strongest relationship.
+- **People targeted** shows a weaker relationship with exposure, possibly
+  because targeting reflects operational capacity constraints rather than
+  storm severity alone.
+
+### Objective 3: Extending the 3RM with exposure
+
+- **3RM replication**: The published 3RM (Rost 2025, Adj R² = 0.71)
+  reproduces closely with the updated v1.8 dataset.
+- **CIRV is not significant** for storm-only allocations in any specification
+  and can be dropped without loss of fit.
+- **Exposure contributes most when LogTargeted is absent** (Model B), showing
+  the largest Adj R² gains, though coefficients remain non-significant.
+- **Small sample size limits significance**: With only 29--40 TC allocations,
+  exposure can improve Adj R² while remaining non-significant. This is a power
+  limitation, not evidence of absence.
+- **Bottom line**: Exposure captures storm severity but does not significantly
+  predict CERF allocation amounts in any model specification tested.
+
+## Appendix: Objective 1 Expansion -- Feature Engineering
+
+CIRV performed poorly as a vulnerability proxy for TC allocations. Can we
+construct a better country-level feature from the CERF data itself? We test
+two variants of historical average Rapid Response spending per country as
+a predictor of TC allocation amounts.
+
+Note: both features involve data leakage since the outcome allocation
+contributes (directly or indirectly) to the country average. We use a
+leave-one-out (LOO) mean to partially mitigate this, but the results
+should be interpreted as exploratory upper bounds rather than validated
+predictions.
+
+```{python}
+#| label: feat-eng-setup
+#| output: false
+from src.datasets.cerf import load_cerf_api_data
+import statsmodels.api as sm
+
+# TC-only LOO mean: for each row, avg of all OTHER TC allocations for that country
+def loo_mean(group):
+    total = group["total_usd"].sum()
+    n = len(group)
+    if n <= 1:
+        return pd.Series([np.nan] * n, index=group.index)
+    return (total - group["total_usd"]) / (n - 1)
+
+df_fe = merged_2016.copy()
+df_fe["tc_avg_rr_loo"] = df_fe.groupby("iso3", group_keys=False).apply(loo_mean)
+
+# All-type avg annual RR: country-level mean annual RR spending across all emergency types
+df_cerf_all_rr = load_cerf_api_data(emergency_type=None)
+yearly_rr = (
+    df_cerf_all_rr
+    .groupby(["CountryCode", "Year"])["TotalAmountApproved"]
+    .sum()
+    .reset_index()
+)
+country_avg_annual_rr = (
+    yearly_rr
+    .groupby("CountryCode")["TotalAmountApproved"]
+    .mean()
+    .reset_index()
+    .rename(columns={"TotalAmountApproved": "all_avg_annual_rr", "CountryCode": "iso3"})
+)
+df_fe = df_fe.merge(country_avg_annual_rr, on="iso3", how="left")
+```
+
+### Feature 1: TC-Only Average RR (Leave-One-Out)
+
+For each storm-country allocation, we compute the average of all *other*
+TC allocations to the same country (excluding the current one). Countries
+with only a single TC allocation are dropped.
+
+```{python}
+#| label: feat-tc-loo
+df_tc_loo = df_fe.dropna(subset=["tc_avg_rr_loo"]).copy()
+df_tc_loo = df_tc_loo[df_tc_loo["total_usd"] > 0].copy()
+df_tc_loo["ln_alloc"] = np.log(df_tc_loo["total_usd"])
+df_tc_loo["ln_tc_avg"] = np.log(df_tc_loo["tc_avg_rr_loo"])
+
+print(f"n = {len(df_tc_loo)} (countries with >1 TC allocation: {df_tc_loo['iso3'].nunique()})")
+
+X = sm.add_constant(df_tc_loo[["ln_tc_avg"]])
+m = sm.OLS(df_tc_loo["ln_alloc"], X).fit()
+
+rows = []
+for col, label in exp_meta:
+    sub = df_tc_loo.dropna(subset=[col])
+    sub = sub[sub[col] > 0].copy()
+    sub["ln_exp"] = np.log(sub[col])
+
+    me = sm.OLS(sub["ln_alloc"], sm.add_constant(sub[["ln_exp"]])).fit()
+    ma = sm.OLS(sub["ln_alloc"], sm.add_constant(sub[["ln_tc_avg"]])).fit()
+    mb = sm.OLS(sub["ln_alloc"], sm.add_constant(sub[["ln_tc_avg", "ln_exp"]])).fit()
+
+    rows.append({
+        "Threshold": label, "n": len(sub),
+        "Exposure only": f"{me.rsquared_adj:.3f}",
+        "TC avg RR only": f"{ma.rsquared_adj:.3f}",
+        "Both": f"{mb.rsquared_adj:.3f}",
+        "p (TC avg)": f"{mb.pvalues['ln_tc_avg']:.3f}{_stars(mb.pvalues['ln_tc_avg'])}",
+        "p (exposure)": f"{mb.pvalues['ln_exp']:.3f}{_stars(mb.pvalues['ln_exp'])}",
+    })
+
+(
+    GT(pd.DataFrame(rows))
+    .tab_header(
+        title="TC-Only Average RR (LOO) as Predictor",
+        subtitle="Adj R² for ln(allocation) ~ predictors, 2016+ TC allocations",
+    )
+)
+```
+
+The TC-only LOO mean has no predictive power (Adj R² near zero). A
+country's past TC allocation levels do not predict the next one, likely
+because TC impacts vary too much from storm to storm.
+
+### Feature 2: All-Type Average Annual RR
+
+Instead of TC-only history, we use each country's average *annual* Rapid
+Response spending across all emergency types as a proxy for overall crisis
+exposure and CERF engagement. This captures country-level factors like
+economy size, disaster frequency, and institutional relationship with CERF.
+
+```{python}
+#| label: feat-all-rr
+df_all_rr = df_fe.dropna(subset=["all_avg_annual_rr"]).copy()
+df_all_rr = df_all_rr[df_all_rr["total_usd"] > 0].copy()
+df_all_rr["ln_alloc"] = np.log(df_all_rr["total_usd"])
+df_all_rr["ln_all_avg"] = np.log(df_all_rr["all_avg_annual_rr"])
+
+print(f"n = {len(df_all_rr)}, countries = {df_all_rr['iso3'].nunique()}")
+
+rows = []
+for col, label in exp_meta:
+    sub = df_all_rr.dropna(subset=[col])
+    sub = sub[sub[col] > 0].copy()
+    sub["ln_exp"] = np.log(sub[col])
+
+    me = sm.OLS(sub["ln_alloc"], sm.add_constant(sub[["ln_exp"]])).fit()
+    ma = sm.OLS(sub["ln_alloc"], sm.add_constant(sub[["ln_all_avg"]])).fit()
+    mb = sm.OLS(sub["ln_alloc"], sm.add_constant(sub[["ln_all_avg", "ln_exp"]])).fit()
+
+    rows.append({
+        "Threshold": label, "n": len(sub),
+        "Exposure only": f"{me.rsquared_adj:.3f}",
+        "All-type avg RR only": f"{ma.rsquared_adj:.3f}",
+        "Both": f"{mb.rsquared_adj:.3f}",
+        "p (avg RR)": f"{mb.pvalues['ln_all_avg']:.3f}{_stars(mb.pvalues['ln_all_avg'])}",
+        "p (exposure)": f"{mb.pvalues['ln_exp']:.3f}{_stars(mb.pvalues['ln_exp'])}",
+    })
+
+(
+    GT(pd.DataFrame(rows))
+    .tab_header(
+        title="All-Type Average Annual RR as Predictor",
+        subtitle="Adj R² for ln(allocation) ~ predictors, 2016+ TC allocations",
+    )
+)
+```
+
+Average annual RR across all emergency types is a strong, significant
+predictor on its own, outperforming both CIRV and wind-speed exposure as
+a standalone predictor of TC allocation amounts across all thresholds
+(see table above). However, the data
+leakage caveat applies: each country's TC allocations contribute to its
+own average, inflating the apparent predictive power. Note that the average
+is computed as a single country-level value (mean annual RR across all
+years and emergency types), not joined per-year, so every TC allocation
+for a given country receives the same predictor value.
+
+### Note: Cyclone-Specific Vulnerability Indices
+
+We explored whether an external cyclone-specific vulnerability index could
+serve as a better country-level predictor than CIRV. No ready-to-use,
+cyclone-specific socioeconomic vulnerability index exists at the country
+level. The closest options are:
+
+- **INFORM Risk Index**: What CIRV is derived from. Already tested in this
+  analysis; not significant for TC allocations.
+- **Basnayake et al. (2026) Coastal Vulnerability Index**: A global
+  assessment of coastal vulnerability to erosion and flooding
+  (doi:10.1038/s41467-025-67275-6). Purely geophysical (coastal slope,
+  geomorphology, tidal range, wave height, sea level change, shoreline
+  change). No socioeconomic component, so unlikely to predict allocation
+  decisions.
+- **TCE-DAT**: Global tropical cyclone exposure dataset (1950--2015) with
+  population and GDP exposed to wind thresholds. Similar to the OCHA
+  exposure data we already use, but adds an asset/GDP dimension.
+- **CLIMADA**: Open-source risk modeling platform that could produce
+  country-level TC risk estimates, but requires running the model rather
+  than providing a precomputed index.
+- **ND-GAIN**: Climate adaptation vulnerability index. Country level, 192
+  countries. Not cyclone-specific but more climate-focused than INFORM.
+
+The finding that CERF's own historical RR spending outperforms all
+external indices as a vulnerability proxy suggests that the factors driving
+allocation decisions (crisis frequency, government capacity, CERF
+relationship) are better captured by revealed spending patterns than by
+any single external index.

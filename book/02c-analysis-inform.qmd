@@ -1,0 +1,710 @@
+---
+title: "3RM -- INFORM Update"
+jupyter: ds-storm-impact
+---
+
+::: {.callout-note appearance="simple"}
+## Summary
+
+The [Rost (2025)](https://zenodo.org/records/15164535) 3RM model uses CIRV
+(CERF Index for Risk and Vulnerability) as a country-level vulnerability
+predictor. CIRV is itself a composite of INFORM Risk, INFORM Severity, and a
+CERF-specific multi-indicator component
+([Rost, Ham & Kaffes 2026](https://doi.org/10.1186/s41018-025-00184-x)).
+Here we test whether replacing CIRV with the underlying INFORM indices
+directly could improve or simplify the model.
+
+We test this by substituting CIRV with **(1)** the INFORM Risk Index
+(forward-looking structural risk, annual), **(2)** the INFORM Severity
+Index (backward-looking crisis conditions, monthly), and **(3)** both
+together. On the full 3RM dataset (n=422), INFORM Risk performs
+comparably to CIRV (Adj R² = 0.709 vs 0.707). On the subset with
+Severity coverage (n=237, 2019+), using both Risk and Severity together
+yields the best fit (Adj R² = 0.729), with both coefficients significant.
+Decomposing either index into individual pillars does not improve on
+the composite scores.
+:::
+
+```{python}
+#| label: setup
+#| output: false
+import sys
+sys.path.insert(0, "..")
+
+import pandas as pd
+import numpy as np
+import statsmodels.api as sm
+from great_tables import GT, loc, style
+from plotnine import *
+import warnings
+from dotenv import load_dotenv
+
+load_dotenv()
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning, module="plotnine")
+```
+
+## Background: INFORM Risk vs INFORM Severity
+
+The [INFORM framework](https://drmkc.jrc.ec.europa.eu/inform-index)
+provides two complementary indices, each capturing a different dimension
+of humanitarian context:
+
+| | INFORM Risk | INFORM Severity |
+|---|---|---|
+| **Orientation** | Forward-looking | Backward-looking |
+| **Question** | "How at-risk is this country?" | "How bad is the crisis right now?" |
+| **Frequency** | Annual | Monthly |
+| **Unit** | Country | Country (aggregated from crisis-level) |
+| **Scale** | 0--10 | 0--10 |
+| **Source** | DRMKC / JRC | ACAPS / JRC |
+| **Auth required** | No | Yes (ACAPS token) |
+
+[**INFORM Risk**](https://drmkc.jrc.ec.europa.eu/inform-index/InformRisk/Methodology)
+is the geometric mean of three pillars:
+
+- **Hazard & Exposure (HA)**: natural hazards (earthquake, flood, cyclone, etc.) and human hazards (conflict)
+- **Vulnerability (VU)**: socio-economic vulnerability, inequality, uprooted people
+- **Lack of Coping Capacity (CC)**: institutional capacity, infrastructure, health access
+
+[**INFORM Severity**](https://drmkc.jrc.ec.europa.eu/inform-index/INFORM-Severity/Methodology)
+is a multiplicative-additive composite of three dimensions
+([Poljan&scaron;ek et al. 2020](https://drmkc.jrc.ec.europa.eu/inform-index/Portals/0/InfoRM/Severity/INFORM%20Severity%20Methodology%20%2020201019%20online.pdf)):
+
+- **Impact**: geographic and human impact of the crisis
+- **Conditions of affected people**: people in need, concentration of conditions
+- **Complexity**: societal safety, operating environment
+
+The Severity composite is computed as:
+
+$$
+S = 0.70 \times \left( I^{0.33} \times C^{0.66} \right) + 0.30 \times X
+$$
+
+where $I$ = Impact, $C$ = Conditions, and $X$ = Complexity. Because Impact
+and Conditions enter via geometric mean, a zero in either drives the
+combined term to zero.
+
+[**CIRV**](https://doi.org/10.1186/s41018-025-00184-x), used in the 3RM, is a
+weighted average of INFORM Risk (rescaled to 0--100), INFORM Severity
+(rescaled to 0--100), and a third CERF-specific multi-indicator component
+covering food insecurity (IPC), early warning (IASC), and conflict dynamics
+(ACLED). Each contributes one-third of the CIRV score. Before 2020, when
+Severity did not yet exist, CIRV used only Risk and the multi-indicator
+component (50/50 weighting).
+
+## Data
+
+### INFORM Risk (DRMKC API)
+
+The INFORM Risk API (`drmkc.jrc.ec.europa.eu`) provides scores for all
+countries across back-calculated years using the latest methodology. No
+authentication is required.
+
+```{python}
+#| label: load-risk
+#| output: false
+
+# INFORM Risk + Severity are pre-fetched by scripts/refresh_inform_composite.py
+# and stored in a single parquet on blob. Here we read that parquet and
+# derive per-indicator views.
+from src.datasets.inform import load_inform
+
+df_inform = load_inform()
+# Exclude forward-carried rows (risk_source_year != year) — those only
+# exist to serve the production predictor app for the current calendar
+# year, not for historical analysis.
+df_inform_real = df_inform[df_inform["risk_source_year"] == df_inform["year"]]
+
+RISK_INDICATORS = ["INFORM", "HA", "VU", "CC"]
+df_risk = (
+    df_inform_real[["iso3", "year", "inform_risk", "inform_ha",
+                    "inform_vu", "inform_cc"]]
+    .drop_duplicates(subset=["iso3", "year"])
+    .rename(columns={
+        "inform_risk": "INFORM", "inform_ha": "HA",
+        "inform_vu": "VU", "inform_cc": "CC",
+    })
+    .reset_index(drop=True)
+)
+```
+
+```{python}
+#| label: risk-summary
+print(f"INFORM Risk: {len(df_risk)} rows, "
+      f"{df_risk['iso3'].nunique()} countries, "
+      f"years {df_risk['year'].min()}–{df_risk['year'].max()}")
+print(f"Null counts: {df_risk[RISK_INDICATORS].isnull().sum().sum()}")
+```
+
+### INFORM Severity (ACAPS)
+
+The INFORM Severity Index is available from the ACAPS API (requires
+authentication) and is also stored as a pre-processed parquet file on
+OCHA blob storage. We use the blob version for reproducibility and speed.
+
+Severity is reported at the crisis level. Multiple crises can exist in a
+single country; records with `country_level == "Yes"` are pre-computed
+national aggregates (using max across overlapping crises per indicator,
+then re-deriving the composite). For the rare country-months with multiple
+`country_level == "Yes"` entries (8 countries, primarily transitional
+reclassifications), we take the maximum severity score.
+
+```{python}
+#| label: load-severity
+#| output: false
+
+# Severity is already aggregated to iso3+year_month (max across multi-crisis
+# country-months) upstream in scripts/refresh_inform_composite.py.
+df_sev = (
+    df_inform_real[["iso3", "year_month", "inform_severity",
+                    "inform_impact", "inform_conditions",
+                    "inform_complexity"]]
+    .dropna(subset=["inform_severity"])
+    .drop_duplicates()
+    .rename(columns={
+        "inform_severity": "severity", "inform_impact": "impact",
+        "inform_conditions": "conditions", "inform_complexity": "complexity",
+    })
+    .reset_index(drop=True)
+)
+```
+
+```{python}
+#| label: severity-summary
+ym_min = df_sev["year_month"].min()
+ym_max = df_sev["year_month"].max()
+print(f"INFORM Severity: {len(df_sev)} country-months, "
+      f"{df_sev['iso3'].nunique()} countries, "
+      f"{ym_min} to {ym_max}")
+```
+
+### Joining INFORM Data to the 3RM Dataset
+
+The 3RM dataset contains 422 rapid-response allocations (2016--2025), each
+with a country name, year, and submission date. We join the two INFORM
+datasets using different strategies:
+
+- **INFORM Risk** is joined by **iso3 + year**, since Risk scores are annual
+  and country-level. The 3RM does not include ISO3 codes, so we map country
+  names manually. Risk data spans 2016--2025, matching the 3RM period exactly.
+- **INFORM Severity** is joined by **iso3 + year-month**, matching each
+  allocation to the Severity score for that country in the month the
+  allocation was submitted. This leverages Severity's monthly resolution
+  rather than aggregating to yearly values, capturing the crisis conditions
+  at the time of the allocation decision. Severity data is only available
+  from January 2019, so 2016--2018 allocations will have no Severity match.
+
+For INFORM Severity, we apply two filters before joining:
+
+1. **Country-level records only** (`country_level == "Yes"`). The raw data
+   includes both country-level aggregates and individual sub-crisis records.
+   The country-level record is a pre-computed national aggregate: for
+   overlapping crises, ACAPS takes the maximum per indicator; for
+   non-overlapping crises, it sums. The composite score is then re-derived
+   from these aggregated indicators.
+2. **Max severity for multi-crisis months.** In 8 countries (COL, ETH, IDN,
+   IRQ, MAR, MEX, MRT, PHL), transitional reclassifications produce multiple
+   `country_level == "Yes"` records in the same month. We take the maximum
+   severity score, consistent with ACAPS's own aggregation approach for
+   overlapping crises.
+
+```{python}
+#| label: load-3rm
+#| output: false
+
+# build_training_frame loads the 3RM Excel, joins it with the INFORM
+# parquet on iso3+year (Risk) and iso3+year_month (Severity), and
+# computes inform_composite. Same logic that used to live here inline.
+from src.datasets.inform import build_training_frame
+
+df = build_training_frame(inform=df_inform)
+```
+
+```{python}
+#| label: coverage-table
+cov_rows = [
+    {
+        "Variable": "CIRV (Rost 2025)",
+        "Matched": int(df["CIRV"].notna().sum()),
+        "Missing": int(df["CIRV"].isna().sum()),
+        "Coverage": f"{df['CIRV'].notna().mean():.0%}",
+        "Join key": "Embedded in 3RM",
+    },
+    {
+        "Variable": "INFORM Risk",
+        "Matched": int(df["inform_risk"].notna().sum()),
+        "Missing": int(df["inform_risk"].isna().sum()),
+        "Coverage": f"{df['inform_risk'].notna().mean():.0%}",
+        "Join key": "iso3 + year",
+    },
+    {
+        "Variable": "INFORM Severity",
+        "Matched": int(df["inform_severity"].notna().sum()),
+        "Missing": int(df["inform_severity"].isna().sum()),
+        "Coverage": f"{df['inform_severity'].notna().mean():.0%}",
+        "Join key": "iso3 + year-month",
+    },
+    {
+        "Variable": "INFORM Composite",
+        "Matched": int(df["inform_composite"].notna().sum()),
+        "Missing": int(df["inform_composite"].isna().sum()),
+        "Coverage": f"{df['inform_composite'].notna().mean():.0%}",
+        "Join key": "mean(Risk, Severity) or Risk alone",
+    },
+]
+
+(
+    GT(pd.DataFrame(cov_rows))
+    .tab_header(
+        title="INFORM Data Coverage in 3RM Dataset",
+        subtitle=f"n = {len(df)} rapid-response allocations (2016--2025)",
+    )
+    .tab_style(style=style.css("font-size: 0.85em;"), locations=loc.body())
+    .tab_style(style=style.css("font-size: 0.85em;"), locations=loc.column_labels())
+    .tab_source_note(
+        "INFORM Severity coverage is lower because the index began in 2019 "
+        "(140 gaps from 2016--2018). The remaining 45 gaps are countries "
+        "without ACAPS crisis tracking (7) or months before that country's "
+        "Severity coverage began (38)."
+    )
+)
+```
+
+INFORM Risk achieves full coverage because it is annual and spans the
+same period as the 3RM. INFORM Severity covers 56% of allocations; the
+gaps have three causes: 140 allocations from 2016--2018 (before the index
+existed), 7 allocations in countries without ACAPS crisis tracking
+(Comoros, Guinea, Kyrgyzstan, Equatorial Guinea, Samoa), and 38
+allocations where the country's Severity coverage had not yet started
+for that specific month.
+
+```{python}
+#| label: severity-gap-by-year
+no_sev = df[df["inform_severity"].isnull()]
+gap_df = no_sev.groupby("year").size().reset_index(name="Missing allocations")
+gap_df.columns = ["Year", "Missing allocations"]
+
+(
+    GT(gap_df)
+    .tab_header(
+        title="INFORM Severity Gaps by Year",
+        subtitle="Allocations with no matching Severity data",
+    )
+    .tab_style(style=style.css("font-size: 0.85em;"), locations=loc.body())
+    .tab_style(style=style.css("font-size: 0.85em;"), locations=loc.column_labels())
+    .tab_source_note("INFORM Severity Index launched in 2019.")
+)
+```
+
+## CIRV vs INFORM: Correlation
+
+How do the INFORM indices relate to each other and to CIRV?
+
+```{python}
+#| label: correlation-matrix
+#| fig-cap: "Pairwise Pearson correlations between CIRV and INFORM components (n = rows with all values present). CIRV correlates most strongly with INFORM Risk (r = 0.82)."
+corr_vars = {
+    "CIRV": "CIRV",
+    "inform_risk": "Risk",
+    "inform_severity": "Severity",
+    "inform_ha": "HA",
+    "inform_vu": "VU",
+    "inform_cc": "CC",
+}
+
+df_corr = df[list(corr_vars.keys())].rename(columns=corr_vars).dropna()
+corr_mat = df_corr.corr()
+
+# Melt for heatmap
+corr_melt = corr_mat.reset_index().melt(id_vars="index", var_name="var2", value_name="r")
+corr_melt = corr_melt.rename(columns={"index": "var1"})
+var_order = list(corr_vars.values())
+corr_melt["var1"] = pd.Categorical(corr_melt["var1"], categories=var_order, ordered=True)
+corr_melt["var2"] = pd.Categorical(corr_melt["var2"], categories=var_order[::-1], ordered=True)
+
+(
+    ggplot(corr_melt, aes("var1", "var2", fill="r"))
+    + geom_tile(color="white", size=1)
+    + geom_text(aes(label="r"), format_string="{:.2f}", size=10, color="black")
+    + scale_fill_gradient2(
+        low="#2166ac", mid="#f7f7f7", high="#b2182b",
+        midpoint=0, limits=(-1, 1), name="Pearson r",
+    )
+    + labs(x="", y="")
+    + theme_minimal()
+    + theme(
+        figure_size=(7, 6),
+        axis_text=element_text(size=11),
+        legend_position="right",
+    )
+)
+```
+
+```{python}
+#| label: scatter-cirv-vs-inform
+#| fig-cap: "CIRV vs INFORM Risk (left) and INFORM Severity (right) for allocations with all three indices available. Both show strong positive relationships; Severity has more scatter due to its finer monthly resolution."
+df_scatter = df.dropna(subset=["CIRV", "inform_risk", "inform_severity"]).copy()
+
+scatter_long = pd.concat([
+    df_scatter[["CIRV", "inform_risk"]].rename(
+        columns={"inform_risk": "INFORM_score"}
+    ).assign(index_type="INFORM Risk"),
+    df_scatter[["CIRV", "inform_severity"]].rename(
+        columns={"inform_severity": "INFORM_score"}
+    ).assign(index_type="INFORM Severity"),
+])
+
+(
+    ggplot(scatter_long, aes("INFORM_score", "CIRV"))
+    + geom_point(alpha=0.35, size=2, color="#2166ac")
+    + geom_smooth(method="lm", color="#d6604d", se=True, size=0.8)
+    + facet_wrap("~index_type", scales="free_x")
+    + labs(x="INFORM Score (0--10)", y="CIRV (0--100)")
+    + theme_minimal()
+    + theme(
+        figure_size=(12, 5),
+        strip_text=element_text(size=11, weight="bold"),
+    )
+)
+```
+
+## Regression: Replacing CIRV with INFORM
+
+We replicate the 3RM Model 1 specification (emergency type dummies +
+vulnerability index + LogRequired + LogTargeted) and compare model fit
+when swapping CIRV for different INFORM alternatives.
+
+```{python}
+#| label: model-helpers
+#| output: false
+
+ETYPE_COLS = [
+    "Storm", "Flood", "Drought", "OtherNatural",
+    "Cholera", "Ebola", "OtherHealth", "DisplConfl",
+]
+
+def _stars(p):
+    if p < 0.01:
+        return "***"
+    if p < 0.05:
+        return "**"
+    if p < 0.1:
+        return "*"
+    return ""
+
+def _fmt_coef(model, var):
+    """Format as coefficient with stars + p-value in parentheses."""
+    b = model.params[var]
+    p = model.pvalues[var]
+    return f"{b:.3f}{_stars(p)} ({p:.2f})"
+
+def fit_3rm(data, vuln_vars):
+    """Fit 3RM-style OLS with given vulnerability variables."""
+    regressors = ETYPE_COLS + vuln_vars + ["LogRequired", "LogTargeted"]
+    sub = data.dropna(subset=regressors + ["LogApproved"])
+    X = sm.add_constant(sub[regressors].astype(float))
+    return sm.OLS(sub["LogApproved"], X).fit()
+```
+
+### Full Dataset (n = 422)
+
+All 3RM allocations have both CIRV and INFORM Risk coverage, allowing
+direct comparison on the same rows.
+
+```{python}
+#| label: models-full-dataset
+
+m_cirv = fit_3rm(df, ["CIRV"])
+m_risk = fit_3rm(df, ["inform_risk"])
+m_composite = fit_3rm(df, ["inform_composite"])
+m_vu_cc = fit_3rm(df, ["inform_vu", "inform_cc"])
+m_ha_vu_cc = fit_3rm(df, ["inform_ha", "inform_vu", "inform_cc"])
+
+# Build comparison table
+var_labels = {
+    "const": "Intercept",
+    "Storm": "Storm", "Flood": "Flood", "Drought": "Drought",
+    "OtherNatural": "Other Natural", "Cholera": "Cholera",
+    "Ebola": "Ebola", "OtherHealth": "Other Health",
+    "DisplConfl": "Displacement/Conflict",
+    "CIRV": "CIRV", "inform_risk": "INFORM Risk",
+    "inform_composite": "INFORM Composite",
+    "inform_vu": "Vulnerability (VU)", "inform_cc": "Coping Capacity (CC)",
+    "inform_ha": "Hazard & Exposure (HA)",
+    "LogRequired": "Funding req. (ln)", "LogTargeted": "People targeted (ln)",
+}
+
+models_full = {
+    "CIRV": m_cirv,
+    "Risk": m_risk,
+    "Composite": m_composite,
+    "VU + CC": m_vu_cc,
+    "HA + VU + CC": m_ha_vu_cc,
+}
+
+# All variables across models
+all_vars = []
+for m in models_full.values():
+    for v in m.params.index:
+        if v not in all_vars:
+            all_vars.append(v)
+
+tbl_rows = []
+for var in all_vars:
+    row = {"Variable": var_labels.get(var, var)}
+    for mname, m in models_full.items():
+        if var in m.params.index:
+            row[mname] = _fmt_coef(m, var)
+        else:
+            row[mname] = ""
+    tbl_rows.append(row)
+
+tbl_rows.append({
+    "Variable": "n",
+    **{mname: str(int(m.nobs)) for mname, m in models_full.items()},
+})
+tbl_rows.append({
+    "Variable": "Adj R\u00b2",
+    **{mname: f"{m.rsquared_adj:.3f}" for mname, m in models_full.items()},
+})
+tbl_rows.append({
+    "Variable": "AIC",
+    **{mname: f"{m.aic:.1f}" for mname, m in models_full.items()},
+})
+
+tbl_df = pd.DataFrame(tbl_rows)
+
+# Highlight the vulnerability/INFORM rows
+inform_labels = {"CIRV", "INFORM Risk", "INFORM Composite",
+                 "Vulnerability (VU)", "Coping Capacity (CC)",
+                 "Hazard & Exposure (HA)"}
+highlight_idx = tbl_df.index[tbl_df["Variable"].isin(inform_labels)].tolist()
+
+(
+    GT(tbl_df)
+    .tab_header(
+        title="3RM Model with CIRV vs INFORM Risk Alternatives",
+        subtitle="Full dataset (n = 422, 2016--2025)",
+    )
+    .tab_style(style=style.fill(color="#e6eeff"), locations=loc.body(rows=highlight_idx))
+    .tab_style(style=style.css("font-size: 0.85em;"), locations=loc.body())
+    .tab_style(style=style.css("font-size: 0.85em;"), locations=loc.column_labels())
+    .tab_source_note(
+        "Outcome: ln(CERF allocation). Base emergency type: 'Other'. "
+        "Blue rows = vulnerability/risk component being tested. "
+        "*** p < 0.01, ** p < 0.05, * p < 0.1."
+    )
+)
+```
+
+INFORM Risk achieves marginally better Adj R² (0.709) and AIC (565) than
+CIRV (0.707, AIC 569) on the same data. The INFORM Composite -- defined
+as mean(Risk, Severity) where Severity is available, Risk alone otherwise
+-- slightly underperforms Risk alone (0.705 vs 0.709) because the single
+coefficient must reconcile pure-Risk rows (pre-2019) with blended rows
+(2019+). Decomposing Risk into individual pillars does not improve the
+model: VU + CC alone (0.699) is worse, and adding HA back recovers the
+same fit but with more parameters.
+
+### Severity Subset (n = 237, 2019+)
+
+To compare Severity models fairly, we restrict all models to the 237
+allocations with Severity coverage.
+
+```{python}
+#| label: models-severity-subset
+
+df_sub = df.dropna(subset=["inform_severity"]).copy()
+
+m_cirv_s = fit_3rm(df_sub, ["CIRV"])
+m_risk_s = fit_3rm(df_sub, ["inform_risk"])
+m_sev_s = fit_3rm(df_sub, ["inform_severity"])
+m_sev_pillars = fit_3rm(
+    df_sub, ["inform_impact", "inform_conditions", "inform_complexity"]
+)
+m_both = fit_3rm(df_sub, ["inform_risk", "inform_severity"])
+m_composite_s = fit_3rm(df_sub, ["inform_composite"])
+
+var_labels_sub = {
+    **var_labels,
+    "inform_severity": "INFORM Severity",
+    "inform_impact": "Impact",
+    "inform_conditions": "Conditions",
+    "inform_complexity": "Complexity",
+}
+
+models_sub = {
+    "CIRV": m_cirv_s,
+    "Risk": m_risk_s,
+    "Severity": m_sev_s,
+    "Composite": m_composite_s,
+    "Sev. pillars": m_sev_pillars,
+    "Risk + Sev.": m_both,
+}
+
+all_vars_sub = []
+for m in models_sub.values():
+    for v in m.params.index:
+        if v not in all_vars_sub:
+            all_vars_sub.append(v)
+
+tbl_rows_sub = []
+for var in all_vars_sub:
+    row = {"Variable": var_labels_sub.get(var, var)}
+    for mname, m in models_sub.items():
+        if var in m.params.index:
+            row[mname] = _fmt_coef(m, var)
+        else:
+            row[mname] = ""
+    tbl_rows_sub.append(row)
+
+tbl_rows_sub.append({
+    "Variable": "n",
+    **{mname: str(int(m.nobs)) for mname, m in models_sub.items()},
+})
+tbl_rows_sub.append({
+    "Variable": "Adj R\u00b2",
+    **{mname: f"{m.rsquared_adj:.3f}" for mname, m in models_sub.items()},
+})
+tbl_rows_sub.append({
+    "Variable": "AIC",
+    **{mname: f"{m.aic:.1f}" for mname, m in models_sub.items()},
+})
+
+tbl_df_sub = pd.DataFrame(tbl_rows_sub)
+
+inform_labels_sub = {
+    "CIRV", "INFORM Risk", "INFORM Severity", "INFORM Composite",
+    "Impact", "Conditions", "Complexity",
+}
+highlight_idx_sub = tbl_df_sub.index[
+    tbl_df_sub["Variable"].isin(inform_labels_sub)
+].tolist()
+
+(
+    GT(tbl_df_sub)
+    .tab_header(
+        title="3RM Model with CIRV vs INFORM Alternatives",
+        subtitle="Severity subset (n = 237, 2019+) for apples-to-apples comparison",
+    )
+    .tab_style(
+        style=style.fill(color="#e6eeff"),
+        locations=loc.body(rows=highlight_idx_sub),
+    )
+    .tab_style(style=style.css("font-size: 0.85em;"), locations=loc.body())
+    .tab_style(style=style.css("font-size: 0.85em;"), locations=loc.column_labels())
+    .tab_source_note(
+        "Outcome: ln(CERF allocation). All models use the same 237 rows. "
+        "Blue rows = vulnerability/risk component being tested. "
+        "*** p < 0.01, ** p < 0.05, * p < 0.1."
+    )
+)
+```
+
+### Summary
+
+```{python}
+#| label: summary-comparison
+#| fig-cap: "Adjusted R² for each model specification. Models available on the full dataset (n=422) shown in blue; models requiring the severity subset (n=237, 2019+) in orange. Dashed line marks the CIRV baseline on the severity subset."
+
+summary_rows = [
+    {"Model": "Risk: VU + CC", "Adj R²": m_vu_cc.rsquared_adj,
+     "Dataset": "Full (n=422)"},
+    {"Model": "CIRV", "Adj R²": m_cirv.rsquared_adj,
+     "Dataset": "Full (n=422)"},
+    {"Model": "INFORM Risk", "Adj R²": m_risk.rsquared_adj,
+     "Dataset": "Full (n=422)"},
+    {"Model": "Risk: HA+VU+CC", "Adj R²": m_ha_vu_cc.rsquared_adj,
+     "Dataset": "Full (n=422)"},
+    {"Model": "INFORM Composite", "Adj R²": m_composite.rsquared_adj,
+     "Dataset": "Full (n=422)"},
+    {"Model": "CIRV*", "Adj R²": m_cirv_s.rsquared_adj,
+     "Dataset": "Subset (n=237)"},
+    {"Model": "INFORM Composite*", "Adj R²": m_composite_s.rsquared_adj,
+     "Dataset": "Subset (n=237)"},
+    {"Model": "Severity pillars", "Adj R²": m_sev_pillars.rsquared_adj,
+     "Dataset": "Subset (n=237)"},
+    {"Model": "INFORM Risk*", "Adj R²": m_risk_s.rsquared_adj,
+     "Dataset": "Subset (n=237)"},
+    {"Model": "INFORM Severity", "Adj R²": m_sev_s.rsquared_adj,
+     "Dataset": "Subset (n=237)"},
+    {"Model": "Risk + Severity", "Adj R²": m_both.rsquared_adj,
+     "Dataset": "Subset (n=237)"},
+]
+summary_df = pd.DataFrame(summary_rows)
+summary_df["Model"] = pd.Categorical(
+    summary_df["Model"],
+    categories=summary_df["Model"].tolist(),
+    ordered=True,
+)
+
+(
+    ggplot(summary_df, aes("Adj R²", "Model", color="Dataset"))
+    + geom_vline(
+        xintercept=m_cirv_s.rsquared_adj,
+        linetype="dashed", color="#999999", size=0.5,
+    )
+    + geom_segment(aes(x=0.695, xend="Adj R²", yend="Model"), color="#dddddd", size=0.5)
+    + geom_point(size=4)
+    + geom_text(
+        aes(label="Adj R²"), format_string="{:.3f}",
+        nudge_x=0.0015, size=9, ha="left", show_legend=False,
+    )
+    + scale_color_manual(values={"Full (n=422)": "#2166ac", "Subset (n=237)": "#d6604d"})
+    + scale_x_continuous(limits=(0.695, 0.735))
+    + labs(x="Adjusted R²", y="", color="")
+    + theme_minimal()
+    + theme(
+        figure_size=(10, 5),
+        axis_text_y=element_text(size=10),
+        legend_position="top",
+    )
+)
+```
+
+## Interpretation
+
+- **INFORM Risk is a drop-in replacement for CIRV.** On the full dataset
+  (n=422), swapping CIRV for INFORM Risk produces nearly identical fit
+  (Adj R² 0.709 vs 0.707, lower AIC). This is unsurprising given CIRV is
+  partly derived from INFORM Risk.
+- **Both INFORM indices individually outperform CIRV.** On the same 237
+  rows, INFORM Risk and Severity each achieve Adj R² = 0.724 vs 0.717
+  for CIRV.
+- **Risk + Severity together is the best specification** (Adj R² = 0.729,
+  lowest AIC). Both coefficients are significant (p < 0.03), capturing
+  non-redundant information: structural vulnerability (Risk) and current
+  crisis conditions (Severity).
+- **Decomposing into pillars does not help.** The composite scores are
+  more efficient predictors than their constituent pillars. For Severity,
+  only Complexity is individually significant, likely because Impact and
+  Conditions enter the composite multiplicatively and are hard to
+  disentangle in a linear model.
+- **Severity coverage constrains the comparison.** The 237-row subset
+  excludes 2016--2018. For full temporal coverage, INFORM Risk alone
+  (n=422, Adj R² = 0.709) is the practical choice.
+- **The INFORM Composite offers limited advantage.** On the 2019+
+  subset, the composite (single variable) matches the two-variable
+  Risk + Severity model (0.730 vs 0.729), as expected given the near-equal
+  coefficients. On the full dataset, however, the composite (0.705) is
+  slightly worse than Risk alone (0.709): the single coefficient must
+  compromise between pure-Risk rows (pre-2019) and blended rows (2019+),
+  introducing inconsistency.
+
+## Key Findings
+
+- **INFORM Risk can replace CIRV** with no loss in fit and the advantage
+  of being a transparent, publicly available index (no authentication,
+  open API).
+- **Adding INFORM Severity** produces the best model (Adj R² = 0.729),
+  but requires an ACAPS token and is limited to 2019+.
+- **The INFORM Composite** (mean of Risk and Severity, falling back to
+  Risk alone pre-2019) matches the two-variable model on 2019+ data but
+  slightly underperforms Risk alone on the full dataset. It does not
+  offer a clear advantage over simpler alternatives.
+- **Composite scores outperform individual pillars** for both indices.
+- **Operational recommendation:** given the modest Adj R² improvement
+  from Severity (0.724 vs 0.709) and the benefit of fitting on the
+  larger 2016+ dataset (n=422 vs 237), INFORM Risk alone is the
+  recommended specification.

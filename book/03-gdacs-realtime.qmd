@@ -1,0 +1,456 @@
+---
+title: "Real-Time GDACS Exposure Retrieval"
+jupyter: ds-storm-impact
+---
+
+This chapter explores the feasibility of retrieving population exposure
+estimates in real time from GDACS during an active or developing storm.
+Unlike the historical CSV exports explored in @sec-gdacs-completeness
+(which had null exposure values for 2016--2021), the GDACS REST API
+provides per-advisory exposure data going back to at least 2015.
+
+```{python}
+#| label: setup
+#| output: false
+import sys
+
+sys.path.insert(0, "..")
+
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from shapely.geometry import Polygon
+
+from src.datasets.gdacs import (
+    get_active_cyclones,
+    get_event_detail,
+    get_timeline,
+    get_impact_by_country,
+    load_ibtracs_lookup,
+    match_gdacs_to_ibtracs,
+    wind_radii_polygon,
+)
+
+# -- Plotting helpers (inline, not in src module) --
+
+_INTENSITY_BREAKS = [
+    (17.5, "#5ebaff", "TD"),
+    (25.0, "#00faf4", "TS"),
+    (33.0, "#ffffcc", "Cat 1"),
+    (43.0, "#ffe775", "Cat 2"),
+    (50.0, "#ffc140", "Cat 3"),
+    (58.0, "#ff8f20", "Cat 4"),
+    (999, "#ff6060", "Cat 5"),
+]
+
+
+def _wind_color(wind_ms):
+    if np.isnan(wind_ms):
+        return "#cccccc"
+    for threshold, color, _ in _INTENSITY_BREAKS:
+        if wind_ms < threshold:
+            return color
+    return "#ff6060"
+
+
+def plot_track_interactive(timeline, event_name="", show_radii=True, radii_interval=4):
+    df = timeline.dropna(subset=["latitude", "longitude"]).copy()
+    df["color"] = df["wind_speed"].apply(_wind_color)
+    df["wind_kmh"] = (df["wind_speed"] * 3.6).round(1)
+    df["is_actual"] = df["actual"].astype(str).str.lower() == "true"
+
+    fig = make_subplots(
+        rows=2, cols=1, row_heights=[0.7, 0.3],
+        specs=[[{"type": "map"}], [{"type": "xy"}]],
+        vertical_spacing=0.05,
+    )
+
+    # Track line
+    fig.add_trace(
+        go.Scattermap(
+            lat=df["latitude"], lon=df["longitude"],
+            mode="lines", line={"width": 2, "color": "gray"},
+            showlegend=False, hoverinfo="skip",
+        ), row=1, col=1,
+    )
+
+    # Advisory points
+    for _, row in df.iterrows():
+        status = row.get("storm_status", "")
+        hover = (
+            f"<b>{row.get('name', '')}</b><br>"
+            f"Advisory {int(row['advisory_number'])}<br>"
+            f"{row['advisory_datetime']}<br>"
+            f"Wind: {row['wind_kmh']} km/h ({row['wind_speed']:.1f} m/s)<br>"
+            f"Status: {status}<br>"
+            f"Pop 39kt: {row['pop39']:,.0f}<br>"
+            f"Pop 74kt: {row['pop74']:,.0f}"
+        )
+        fig.add_trace(
+            go.Scattermap(
+                lat=[row["latitude"]], lon=[row["longitude"]],
+                mode="markers",
+                marker={"size": 10, "color": row["color"],
+                        "opacity": 1.0 if row["is_actual"] else 0.5},
+                text=hover, hoverinfo="text", showlegend=False,
+            ), row=1, col=1,
+        )
+
+    # Wind radii
+    if show_radii:
+        radii_config = {
+            "34kt": ("rgba(51,136,255,{a})", 0.10),
+            "50kt": ("rgba(255,136,0,{a})", 0.15),
+            "64kt": ("rgba(255,0,0,{a})", 0.20),
+        }
+        for idx, row in df.iterrows():
+            if idx % radii_interval != 0:
+                continue
+            for kt, (color, opacity) in radii_config.items():
+                ne = row.get(f"windrad_nm_{kt}_ne", 0) or 0
+                se = row.get(f"windrad_nm_{kt}_se", 0) or 0
+                sw = row.get(f"windrad_nm_{kt}_sw", 0) or 0
+                nw = row.get(f"windrad_nm_{kt}_nw", 0) or 0
+                poly = wind_radii_polygon(
+                    row["latitude"], row["longitude"], ne, se, sw, nw
+                )
+                if poly is None:
+                    continue
+                lons, lats = poly.exterior.xy
+                fig.add_trace(
+                    go.Scattermap(
+                        lat=list(lats), lon=list(lons),
+                        mode="lines", fill="toself",
+                        fillcolor=color.format(a=opacity),
+                        line={"width": 0.5, "color": color.format(a=1.0)},
+                        showlegend=False, hoverinfo="skip",
+                    ), row=1, col=1,
+                )
+
+    # Population subplot
+    fig.add_trace(
+        go.Scatter(
+            x=df["advisory_datetime"], y=df["pop39"],
+            fill="tozeroy", fillcolor="rgba(51,136,255,0.2)",
+            line={"color": "#3388ff", "width": 1.5}, name="Pop >= 39 kt",
+        ), row=2, col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=df["advisory_datetime"], y=df["pop74"],
+            fill="tozeroy", fillcolor="rgba(255,0,0,0.2)",
+            line={"color": "#ff0000", "width": 1.5}, name="Pop >= 74 kt",
+        ), row=2, col=1,
+    )
+
+    fig.update_layout(
+        title=f"GDACS Track: {event_name}" if event_name else "GDACS Storm Track",
+        map={"style": "carto-positron",
+             "center": {"lat": df["latitude"].mean(), "lon": df["longitude"].mean()},
+             "zoom": 3},
+        height=900, margin={"l": 40, "r": 20, "t": 60, "b": 40},
+        legend={"yanchor": "bottom", "y": 0.02, "x": 0.01},
+    )
+    fig.update_yaxes(title_text="Population Exposed", row=2, col=1)
+    fig.update_xaxes(title_text="Advisory Time", row=2, col=1)
+    return fig
+```
+
+## Active Cyclones
+
+The GDACS event list endpoint returns all recent tropical cyclones,
+filterable by alert level and date range. No authentication is required.
+
+```{python}
+#| label: active-events
+events = get_active_cyclones()
+events[
+    ["eventid", "name", "alert_level", "country", "is_current", "severity_kmh"]
+].head(10)
+```
+
+## Advisory Timeline
+
+The timeline endpoint is the richest data source. Each row is one
+advisory (typically 6-hourly) with:
+
+- **Position**: latitude, longitude
+- **Intensity**: wind speed (m/s), gusts, pressure
+- **Exposure**: `pop39`, `pop74` (population inside the wind polygon at
+  that advisory -- instantaneous snapshots, not cumulative)
+- **Wind radii**: quadrant radii at 34/50/64 kt in nautical miles
+
+```{python}
+#| label: timeline-demo
+current = events[events["is_current"]]
+event = current.iloc[0] if len(current) > 0 else events.iloc[0]
+eid = event["eventid"]
+name = event["name"]
+
+tl = get_timeline(eid)
+print(f"{name}: {len(tl)} advisories")
+print(f"Peak wind: {tl['wind_speed'].max():.1f} m/s")
+print(f"Max pop exposed >= 39 kt: {tl['pop39'].max():,.0f}")
+print(f"Max pop exposed >= 74 kt: {tl['pop74'].max():,.0f}")
+```
+
+```{python}
+#| label: timeline-table
+tl[
+    [
+        "advisory_number",
+        "advisory_datetime",
+        "wind_speed",
+        "storm_status",
+        "pop39",
+        "pop74",
+    ]
+].head(15)
+```
+
+## Interactive Track Map
+
+Track is colored by Saffir-Simpson intensity. Hover over advisory points
+to see wind speed, storm status, and population exposure. Wind radii
+polygons show the asymmetric wind field at 34/50/64 kt thresholds.
+
+```{python}
+#| label: track-interactive
+fig = plot_track_interactive(tl, event_name=name)
+fig.show()
+```
+
+## Country-Level Impact
+
+The impact endpoint provides population exposure broken down by country
+at two wind thresholds. Note: this endpoint only returns data for events
+from ~2022 onward.
+
+```{python}
+#| label: impact-country
+impact = get_impact_by_country(eid, aggregate=True)
+for buf_name, df_buf in impact.items():
+    if len(df_buf) > 0:
+        total = df_buf["pop_affected"].sum()
+        print(f"\n{buf_name}: {total:,} total")
+        display(df_buf)
+```
+
+## Hindcast: Hurricane MATTHEW (2016)
+
+A key finding: the timeline endpoint has exposure data for events back
+to at least 2015, even though the static CSV export had null values for
+2016--2021. This means we can fill the historical gap using the API.
+
+```{python}
+#| label: hindcast-matthew
+tl_matthew = get_timeline(1000316)
+print(f"MATTHEW-16: {len(tl_matthew)} advisories")
+print(f"Peak wind: {tl_matthew['wind_speed'].max():.1f} m/s")
+print(f"Max pop39: {tl_matthew['pop39'].max():,.0f}")
+print(f"Max pop74: {tl_matthew['pop74'].max():,.0f}")
+```
+
+```{python}
+#| label: hindcast-matthew-plot
+fig_matthew = plot_track_interactive(
+    tl_matthew, event_name="MATTHEW-16 (Hindcast)"
+)
+fig_matthew.show()
+```
+
+## Timeline vs Impact Endpoint {#sec-endpoint-comparison}
+
+Two GDACS endpoints provide population exposure, but with different
+coverage and granularity:
+
+| | Timeline (`gettimeline`) | Impact (`getimpact`) |
+|---|---|---|
+| **Granularity** | Per advisory (6-hourly) | Per admin unit |
+| **Geographic** | Total (no country breakdown) | Country + admin level |
+| **Temporal** | 2015+ (works) | ~2022+ only |
+| **Exposure type** | Instantaneous snapshot | Cumulative unique count |
+| **Use case** | Real-time monitoring, hindcasts | Country-level reporting |
+
+The original CSV (`gdacs_historical_national_exposure.csv`) used the
+impact endpoint exclusively, which is why 2016--2021 had null exposure
+values. The timeline endpoint fills this gap.
+
+### Snapshot vs cumulative exposure
+
+The timeline `pop39` at each advisory is the number of people inside the
+wind polygon *at that moment*. The same people appear in consecutive
+advisories as the storm passes over them. Summing across advisories
+double-counts.
+
+The impact endpoint computes the **union** of all wind polygons across
+the full storm track and counts each person only once. For MILTON-24:
+
+- Timeline max: 23.9M (single advisory peak)
+- Impact total: 25.0M (cumulative unique)
+- Timeline sum: 124.6M (meaningless -- overlapping counts)
+
+## Wind Threshold Mapping {#sec-wind-thresholds}
+
+The GDACS API names its impact buffers `buffer39` and `buffer74`, but
+according to the JRC technical report (Probst & Annunziato, 2016,
+EUR 28331 EN, doi:10.2788/504291), the wind radii used in TC bulletins
+are at **34, 50, and 64 kt** -- the standard advisory thresholds from
+NOAA NHC and JTWC.
+
+We validated this by reconstructing the impact figures from timeline
+wind radii + population rasters. Using MILTON-24 as a test case, we
+built cumulative wind footprints (including track corridor buffering)
+and overlaid them on multiple population grids:
+
+| Radii threshold | GHSL 2025 (1km) | WorldPop 2026 | WorldPop 2018 | GDACS impact |
+|---|---|---|---|---|
+| **34 kt** | 23.8M (95%) | 27.3M (109%) | 23.8M (95%) | buffer39 = **25.0M** |
+| 50 kt | -- | 12.8M | 10.8M | -- |
+| **64 kt** | 3.6M (78%) | 4.6M (98%) | 3.7M (81%) | buffer74 = **4.6M** |
+
+**Key conclusions:**
+
+- `buffer39` is built from the **34 kt** wind radii (not 39 kt)
+- `buffer74` is built from the **64 kt** wind radii (not 74 kt)
+- The original CSV column names (`pop_34kt`, `pop_64kt`) are correct;
+  the API buffer names are misleading
+- GDACS uses **GHSL (GHS-POP)**, the JRC's own Global Human Settlement
+  Layer, as its population grid. Remaining discrepancies between our
+  reconstruction and GDACS figures are driven by **raster and
+  methodology configuration**, not a fundamental mismatch -- see
+  @sec-reconstruction-discrepancies
+
+## Reconstructing Cumulative Exposure {#sec-reconstruction}
+
+To fill the 2016--2021 gap where the GDACS impact endpoint returns
+zeros, we reconstructed cumulative exposure from the timeline wind
+radii + a population raster. Two methodological choices matter:
+
+### Wind radii polygon construction
+
+TC advisories report wind radii as the maximum extent in each quadrant
+(NE, SE, SW, NW) in nautical miles. Our `wind_radii_polygon()` function
+supports two methods via a `method` parameter:
+
+- **`"asymmetric"`** (default): cosine-interpolated between quadrant
+  center azimuths (45, 135, 225, 315 degrees), producing smooth,
+  physically realistic shapes that preserve the true wind field
+  asymmetry.
+
+- **`"symmetric"`**: takes `max(NE, SE, SW, NW)` and builds a uniform
+  circle. This replicates the GDACS/JRC methodology: the 2026 GDACS
+  guide and earlier JRC documentation confirm that although bulletins
+  list four quadrant radii, GDACS uses only the maximum value in all
+  directions, overstating the affected area relative to the true
+  asymmetric field.
+
+### Track corridor filling
+
+Advisory positions are 6 hours apart. Simply unioning the instantaneous
+wind polygons leaves gaps between consecutive advisories where the storm
+was present but no polygon exists. We fill these gaps by taking the
+**convex hull of each adjacent pair** of wind polygons, creating a
+smooth swath along the track.
+
+### Validation: symmetric vs asymmetric
+
+Using WorldPop 2026 (1km), tested against the GDACS impact endpoint for
+two recent storms and one 2016 storm where the impact endpoint returns
+zeros (demonstrating gap-filling):
+
+| Storm | Buffer | GDACS Impact | Asymmetric | Symmetric |
+|---|---|---|---|---|
+| KALMAEGI-25 | 34kt | 39.0M | 33.7M (86%) | 37.3M (96%) |
+| KALMAEGI-25 | 64kt | 12.2M | 9.4M (77%) | 11.7M (96%) |
+| MILTON-24 | 34kt | 25.0M | 27.0M (108%) | 30.6M (122%) |
+| MILTON-24 | 64kt | 4.6M | 5.0M (108%) | 6.1M (133%) |
+| MATTHEW-16 | 34kt | **0 (gap)** | **36.0M** | **72.8M** |
+| MATTHEW-16 | 64kt | **0 (gap)** | **3.7M** | **7.9M** |
+
+**Key findings:**
+
+- The **symmetric method matches GDACS within 4%** for multi-country
+  storms (KALMAEGI), confirming the JRC symmetric-circle methodology.
+- The symmetric method **overshoots for MILTON** (122--133%) because
+  MILTON's radii were already fairly symmetric, and GDACS may clip to
+  coastlines or apply other adjustments we don't replicate.
+- **MATTHEW-16 gap-fill works**: the impact endpoint returns zeros for
+  this 2016 storm, but we reconstruct 36M (asymmetric) or 73M
+  (symmetric) exposed at 34kt. The large difference between methods
+  reflects MATTHEW's highly asymmetric wind field.
+- The asymmetric method is more physically realistic and avoids
+  overstating exposure. For operational use, it may be preferable
+  to the GDACS approach.
+- Remaining discrepancies are partly explained by GDACS attributing
+  population at the admin-unit level rather than grid-cell level:
+  16 of 30 admin units for KALMAEGI show `pop_affected` exceeding
+  the admin's actual population by up to 4x.
+
+### Sources of reconstruction discrepancy {#sec-reconstruction-discrepancies}
+
+The differences between our reconstructed figures and GDACS are not
+random error -- they trace to specific configuration choices in three
+areas:
+
+1. **Population raster vintage.** GDACS uses the latest GHSL release
+   (GHS-POP E2025, R2023A). Using the same raster and symmetric method,
+   we match within 1--7%. Switching to an older vintage (e.g. GHSL
+   E2020) systematically underestimates by ~5--6% because it reflects
+   lower population counts.
+
+   | Storm | Buffer | GDACS | GHSL E2025 (1km) | GHSL E2020 (100m) |
+   |---|---|---|---|---|
+   | KALMAEGI-25 | 34kt | 39.0M | 39.6M (102%) | 37.1M (95%) |
+   | KALMAEGI-25 | 64kt | 12.2M | 12.1M (99%) | 11.4M (94%) |
+   | MILTON-24 | 34kt | 25.0M | 26.7M (107%) | 25.9M (104%) |
+   | MILTON-24 | 64kt | 4.6M | 5.0M (107%) | 4.8M (104%) |
+
+   Note: the higher spatial resolution of GHSL E2020 (3 arc-sec vs
+   30 arc-sec) does not compensate for the older population estimate.
+   Vintage matters more than resolution.
+
+2. **Wind polygon method.** Symmetric (GDACS approach) vs asymmetric
+   changes results by 10--30% depending on how asymmetric the storm's
+   wind field is. MATTHEW-16 shows a 2x difference because its wind
+   field was highly lopsided.
+
+3. **Spatial attribution method.** Our reconstruction counts population
+   at the grid-cell level (mask raster pixels inside the wind polygon).
+   GDACS attributes population at the admin-unit level, counting the
+   *entire admin unit's population* if it intersects the wind polygon.
+   This explains cases where GDACS `pop_affected` exceeds the admin
+   unit's actual population.
+
+When reconstructing exposure for the 2016--2021 gap, these choices
+should be made deliberately. Using GHSL E2025 + symmetric method +
+grid-cell attribution gives the closest match to current GDACS figures.
+
+## GDACS Methodology Summary
+
+Based on the JRC technical report (Probst & Annunziato, 2016,
+EUR 28331 EN, doi:10.2788/504291), the 2026 GDACS API guide, and our
+reconstruction testing:
+
+- **Data sources**: NOAA bulletins (Atlantic, E/C Pacific) and JTWC
+  bulletins (W Pacific, Indian Ocean, S Hemisphere), ingested every
+  30 minutes
+- **Wind impact**: advisory wind radii (34/50/64 kt); GDACS uses the
+  **maximum** of the four quadrant radii as a symmetric circle,
+  overlaid on a GHSL population grid
+- **Storm surge**: wind radii + Holland's parametric model + HyFlux2
+- **Rainfall**: NASA GPM (previously NOAA eTRaP)
+
+## IBTrACS Matching
+
+For integration with the CERF pipeline, GDACS events need to be matched
+to IBTrACS storm IDs (`sid`). Matching by storm name + season achieves
+95%+ accuracy.
+
+```{python}
+#| label: ibtracs-matching
+ibtracs = load_ibtracs_lookup()
+matched = match_gdacs_to_ibtracs(events, ibtracs)
+matched[["eventid", "name", "sid", "country"]].head(10)
+```

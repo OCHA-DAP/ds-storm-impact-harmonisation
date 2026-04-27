@@ -1,0 +1,402 @@
+---
+title: "Data & Merge"
+jupyter: ds-storm-impact
+---
+
+This chapter covers the two primary datasets --- CERF storm allocations and
+OCHA cyclone population exposure estimates --- along with the storm ID
+matching process that links them and the merge that produces the analysis
+dataset.
+
+```{python}
+#| label: setup
+#| output: false
+import sys
+sys.path.insert(0, "..")
+
+import ocha_stratus as stratus
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+from great_tables import GT, loc, style
+from plotnine import *
+import warnings
+from dotenv import load_dotenv
+
+warnings.filterwarnings("ignore", module="plotnine")
+
+load_dotenv()
+
+df_ocha = stratus.load_parquet_from_blob(
+    "ds-storm-impact-harmonisation/processed/adm0_ibtracs_exp_all.parquet"
+)
+```
+
+## OCHA Cyclone Exposure Dataset
+
+The ADAM and GDACS exposure datasets proved unusable for this analysis due to
+temporal gaps (see @sec-gdacs-completeness). However, the **OCHA exposure
+dataset** (`adm0_ibtracs_exp_all.parquet`) covers 2001--2026 with 1,271 storms
+and uses IBTrACS `sid` directly --- giving us near-complete overlap with CERF.
+
+```{python}
+#| label: ocha-overview
+print(f"Shape: {df_ocha.shape}")
+print(f"Columns: {list(df_ocha.columns)}")
+print(f"Unique storms (sid): {df_ocha['sid'].nunique()}")
+print(f"Unique countries (ADM0_A3): {df_ocha['ADM0_A3'].nunique()}")
+print(f"Wind speed thresholds: {sorted(df_ocha['speed'].unique())} kt")
+
+df_ocha["year"] = df_ocha["sid"].str[:4].astype(int)
+print(f"Year range: {df_ocha['year'].min()}–{df_ocha['year'].max()}")
+```
+
+Three cumulative wind speed thresholds (34, 50, 64 kt) with population
+exposure per country. The data is confirmed cumulative:
+pop at 34 kt >= 50 kt >= 64 kt.
+
+```{python}
+#| label: ocha-cumulative-check
+from src.datasets.cerf import pivot_ocha_wide
+
+wide = pivot_ocha_wide(df_ocha)
+
+both_34_50 = wide.dropna(subset=["pop_exp_34kt", "pop_exp_50kt"])
+both_50_64 = wide.dropna(subset=["pop_exp_50kt", "pop_exp_64kt"])
+print(f"34kt >= 50kt: {(both_34_50['pop_exp_34kt'] >= both_34_50['pop_exp_50kt']).all()}")
+print(f"50kt >= 64kt: {(both_50_64['pop_exp_50kt'] >= both_50_64['pop_exp_64kt']).sum()}/{len(both_50_64)} rows")
+```
+
+```{python}
+#| label: ocha-storms-per-year
+#| fig-cap: "Number of storms per year in the OCHA exposure dataset."
+storms_per_year = (
+    df_ocha.drop_duplicates("sid")
+    .groupby("year")
+    .size()
+    .reset_index(name="n_storms")
+)
+
+(
+    ggplot(storms_per_year, aes("year", "n_storms"))
+    + geom_col(fill="#4292c6", color="#666666")
+    + scale_x_continuous(breaks=range(storms_per_year["year"].min(), storms_per_year["year"].max() + 1))
+    + labs(x="Year", y="Number of storms", title="OCHA Exposure — Storms per Year")
+    + theme_minimal()
+    + theme(
+        figure_size=(12, 4),
+        axis_text_x=element_text(rotation=45, ha="right"),
+    )
+)
+```
+
+## CERF Storm Allocations (API Pipeline)
+
+CERF storm allocation data is sourced from the
+[CERF GMS API](https://cerfgms-webapi.unocha.org/v1/application/All.xml),
+filtered to **Storm** emergency type and **Rapid Response** window. Each
+allocation is linked to an IBTrACS storm via a curated
+`ApplicationCode -> sid` dictionary (`CERFCODE_TO_SID` in `src/datasets/cerf.py`).
+
+```{python}
+#| label: cerf-api-overview
+from src.datasets.cerf import (
+    load_cerf_api_data,
+    apply_cerfcode_sids,
+    build_analysis_dataset_api,
+    CERFCODE_TO_SID,
+)
+
+df_cerf_api = load_cerf_api_data()
+print(f"CERF API storm allocations: {len(df_cerf_api)}")
+print(f"Year range: {int(df_cerf_api['Year'].min())}–{int(df_cerf_api['Year'].max())}")
+print(f"Countries: {df_cerf_api['CountryCode'].nunique()}")
+
+n_matched = sum(1 for v in CERFCODE_TO_SID.values() if v is not None)
+n_non_tc = sum(1 for v in CERFCODE_TO_SID.values() if v is None)
+print(f"\nCERFCODE_TO_SID: {len(CERFCODE_TO_SID)} entries")
+print(f"  Matched to TC: {n_matched}")
+print(f"  Non-TC (excluded): {n_non_tc}")
+```
+
+```{python}
+#| label: storm-name-lookup
+#| output: false
+# Build a global storm name lookup from IBTrACS
+engine = stratus.get_engine("prod")
+all_sids = sorted({s for s in CERFCODE_TO_SID.values() if s is not None})
+with engine.connect() as conn:
+    sid_names = pd.read_sql(
+        f"SELECT sid, name FROM storms.ibtracs_storms "
+        f"WHERE sid IN ({','.join(repr(s) for s in all_sids)})",
+        conn,
+    )
+sid_name_map = dict(zip(sid_names["sid"], sid_names["name"]))
+```
+
+### Non-TC Allocations
+
+These allocations are classified as "Storm" in the CERF system but are
+not tropical cyclones (inland flooding, tornadoes, etc.). They are
+excluded from the analysis.
+
+```{python}
+#| label: non-tc
+df_matched = apply_cerfcode_sids(df_cerf_api)
+non_tc_codes = {k for k, v in CERFCODE_TO_SID.items() if v is None}
+non_tc = df_cerf_api[df_cerf_api["ApplicationCode"].isin(non_tc_codes)]
+display(
+    non_tc[["ApplicationCode", "CountryName", "Year", "TotalAmountApproved"]]
+    .sort_values("Year")
+    .reset_index(drop=True)
+    .rename(columns={
+        "CountryName": "Country",
+        "TotalAmountApproved": "Amount (USD)",
+    })
+)
+```
+
+## CERF--Exposure Merge
+
+```{python}
+#| label: merge
+#| output: false
+merged_agg = build_analysis_dataset_api(df_ocha)
+merged_agg["storm_name"] = merged_agg["sid"].map(sid_name_map)
+```
+
+### Merged Dataset
+
+```{python}
+#| label: merge-summary
+print(f"Storm-country pairs: {len(merged_agg)}")
+print(f"Unique storms: {merged_agg['sid'].nunique()}")
+print(f"Countries: {merged_agg['iso3'].nunique()}")
+print(f"Year range: {int(merged_agg['allocation_year'].min())}–{int(merged_agg['allocation_year'].max())}")
+print(f"Total CERF: ${merged_agg['total_usd'].sum():,.0f}")
+```
+
+```{python}
+#| label: merged-table
+merged_agg.sort_values("total_usd", ascending=False)[
+    ["Country", "iso3", "sid", "storm_name", "allocation_year", "total_usd",
+     "pop_exp_34kt", "pop_exp_50kt", "pop_exp_64kt"]
+]
+```
+
+```{python}
+#| label: cerf-by-year
+#| fig-cap: "CERF storm allocations by year (API pipeline, after merge with exposure data)."
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+
+yearly = merged_agg.groupby("allocation_year").agg(
+    n_allocations=("total_usd", "size"),
+    total_usd=("total_usd", "sum"),
+)
+
+ax1.bar(yearly.index, yearly["n_allocations"], color="#4292c6", edgecolor="#666")
+ax1.set_xlabel("Year")
+ax1.set_ylabel("Number of storm-country pairs")
+ax1.set_title("Allocation count")
+
+ax2.bar(yearly.index, yearly["total_usd"] / 1e6, color="#ef6548", edgecolor="#666")
+ax2.set_xlabel("Year")
+ax2.set_ylabel("Amount (millions USD)")
+ax2.set_title("Total amount allocated")
+
+plt.tight_layout()
+plt.show()
+```
+
+## Exposure Coverage Gaps {#sec-exposure-gaps}
+
+Not all storms with CERF allocations have corresponding entries in the OCHA
+exposure dataset. This section documents the coverage gap.
+
+```{python}
+#| label: exposure-gap-setup
+#| output: false
+cerf_valid_api = df_matched.dropna(subset=["sid"])
+ocha_wide_api = pivot_ocha_wide(df_ocha)
+merged_api = cerf_valid_api.merge(ocha_wide_api, on=["sid", "iso3"], how="left")
+exp_cols = ["pop_exp_34kt", "pop_exp_50kt", "pop_exp_64kt"]
+merged_api["has_exposure"] = ~merged_api[exp_cols].isna().all(axis=1)
+```
+
+### Summary
+
+```{python}
+#| label: exposure-gap-summary
+n_tc = len(cerf_valid_api)
+n_with_exp = merged_api["has_exposure"].sum()
+n_without_exp = (~merged_api["has_exposure"]).sum()
+n_sids_missing = merged_api.loc[~merged_api["has_exposure"], "sid"].nunique()
+
+print(f"CERF allocations matched to TC sids: {n_tc}")
+print(f"  → with exposure data:              {n_with_exp}")
+print(f"  → without exposure data:           {n_without_exp} ({n_sids_missing} unique storms)")
+```
+
+### Missing storm--country pairs
+
+The table below lists CERF allocations that have a valid IBTrACS sid but no
+matching record in the OCHA exposure data. There are two causes:
+
+1. **Storm absent entirely** --- the storm was never processed by the OCHA
+   exposure pipeline (no records for any country).
+2. **Country not covered** --- the storm exists in the exposure data but
+   not for the specific country that received CERF funding.
+
+```{python}
+#| label: exposure-gap-detail
+gap = merged_api[~merged_api["has_exposure"]].copy()
+
+# Check which sids have *any* record in OCHA exposure
+all_ocha_sids = set(df_ocha["sid"].unique())
+gap["sid_in_ocha"] = gap["sid"].isin(all_ocha_sids)
+gap["gap_reason"] = gap["sid_in_ocha"].map(
+    {False: "Storm absent from exposure data", True: "Country not in exposure for this storm"}
+)
+
+gap["storm_name"] = gap["sid"].map(sid_name_map)
+
+display(
+    gap[["Country", "iso3", "sid", "storm_name", "allocation_year", "Amount in US$", "gap_reason"]]
+    .sort_values(["gap_reason", "allocation_year"])
+    .reset_index(drop=True)
+)
+```
+
+```{python}
+#| label: exposure-gap-by-reason
+gap_summary = (
+    gap.groupby("gap_reason")
+    .agg(
+        n_rows=("sid", "size"),
+        n_storms=("sid", "nunique"),
+        total_usd=("Amount in US$", "sum"),
+    )
+    .reset_index()
+)
+
+(
+    GT(gap_summary)
+    .tab_header(
+        title="CERF Allocations Without Exposure Data",
+    )
+    .cols_label(
+        gap_reason="Reason",
+        n_rows="Rows",
+        n_storms="Unique storms",
+        total_usd="Amount (USD)",
+    )
+    .fmt_currency("total_usd", currency="USD", decimals=0)
+)
+```
+
+These gaps represent a data limitation --- the OCHA exposure pipeline has not
+processed every storm. Notably absent are storms like **FREDDY** (2023),
+one of the longest-lived tropical cyclones on record, and **GAMANE** (2024).
+These allocations are excluded from the regression analysis but remain in
+the full CERF inventory for reference.
+
+## Comparison with Old CSV Pipeline {#sec-pipeline-comparison}
+
+The original analysis used a CSV export with manually assigned storm IDs
+and algorithmic auto-matching. The API pipeline replaces this with a curated
+dictionary. This section compares the resulting analysis datasets.
+
+```{python}
+#| label: pipeline-compare-setup
+#| output: false
+from src.datasets.cerf import build_analysis_dataset, DEFAULT_MANUAL_OVERRIDES
+
+df_cerf_old = stratus.load_csv_from_blob(
+    "ds-storm-impact-harmonisation/processed/cerf-storms-with-sids-2024-02-27.csv"
+)
+merged_old = build_analysis_dataset(
+    df_cerf_old, df_ocha, manual_overrides=DEFAULT_MANUAL_OVERRIDES
+)
+merged_old["storm_name"] = merged_old["sid"].map(sid_name_map)
+```
+
+```{python}
+#| label: pipeline-summary
+summary_df = pd.DataFrame([
+    {
+        "Pipeline": "Old CSV",
+        "Storm-country pairs": len(merged_old),
+        "Unique storms": merged_old["sid"].nunique(),
+        "Countries": merged_old["iso3"].nunique(),
+        "Year range": f"{int(merged_old['allocation_year'].min())}–{int(merged_old['allocation_year'].max())}",
+        "Total CERF (USD)": merged_old["total_usd"].sum(),
+    },
+    {
+        "Pipeline": "CERF API",
+        "Storm-country pairs": len(merged_agg),
+        "Unique storms": merged_agg["sid"].nunique(),
+        "Countries": merged_agg["iso3"].nunique(),
+        "Year range": f"{int(merged_agg['allocation_year'].min())}–{int(merged_agg['allocation_year'].max())}",
+        "Total CERF (USD)": merged_agg["total_usd"].sum(),
+    },
+])
+
+(
+    GT(summary_df)
+    .tab_header(title="Pipeline Comparison Summary")
+    .fmt_currency("Total CERF (USD)", currency="USD", decimals=0)
+    .fmt_number(["Storm-country pairs", "Unique storms", "Countries"], decimals=0)
+)
+```
+
+### New pairs in API pipeline
+
+```{python}
+#| label: new-pairs
+old_keys = set(zip(merged_old["sid"], merged_old["iso3"]))
+new_pairs = merged_agg[
+    ~merged_agg.apply(lambda r: (r["sid"], r["iso3"]) in old_keys, axis=1)
+].copy()
+
+(
+    GT(
+        new_pairs[["Country", "iso3", "sid", "storm_name", "allocation_year", "total_usd"]]
+        .sort_values("allocation_year")
+        .reset_index(drop=True)
+        .rename(columns={"total_usd": "Amount (USD)", "allocation_year": "Year", "storm_name": "Storm"})
+    )
+    .tab_header(
+        title=f"{len(new_pairs)} New Storm-Country Pairs",
+        subtitle="In API pipeline but not in old CSV pipeline",
+    )
+    .fmt_currency("Amount (USD)", currency="USD", decimals=0)
+)
+```
+
+### Pairs dropped from old pipeline
+
+```{python}
+#| label: dropped-pairs
+api_keys = set(zip(merged_agg["sid"], merged_agg["iso3"]))
+dropped = merged_old[
+    ~merged_old.apply(lambda r: (r["sid"], r["iso3"]) in api_keys, axis=1)
+].copy()
+
+if len(dropped) > 0:
+    (
+        GT(
+            dropped[["Country", "iso3", "sid", "storm_name", "allocation_year", "total_usd"]]
+            .sort_values("allocation_year")
+            .reset_index(drop=True)
+            .rename(columns={"total_usd": "Amount (USD)", "allocation_year": "Year", "storm_name": "Storm"})
+        )
+        .tab_header(
+            title=f"{len(dropped)} Dropped Storm-Country Pairs",
+            subtitle="In old CSV pipeline but not in API pipeline",
+        )
+        .fmt_currency("Amount (USD)", currency="USD", decimals=0)
+    )
+else:
+    print("No pairs were dropped — the API pipeline is a strict superset.")
+```

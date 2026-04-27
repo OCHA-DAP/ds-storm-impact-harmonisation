@@ -1,0 +1,577 @@
+---
+title: "NHC Wind Speed Probability Polygons"
+jupyter: ds-storm-impact
+---
+
+This chapter explores the NHC Wind Speed Probability (WSP) polygon data
+stored in `storms.nhc_wsp_polygon` and its relationship to the GDACS
+timeline data. The WSP product provides probabilistic wind field
+estimates that are richer than GDACS's deterministic approach, but lack
+per-storm attribution.
+
+```{python}
+#| label: setup
+#| output: false
+import sys
+
+sys.path.insert(0, "..")
+
+import numpy as np
+import ocha_stratus as stratus
+import pandas as pd
+import geopandas as gpd
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from dotenv import load_dotenv
+
+load_dotenv()
+engine = stratus.get_engine("dev")
+```
+
+## Data Structure
+
+The `storms.nhc_wsp_polygon` table contains basin-wide wind speed
+probability polygons from NOAA NHC. Each row is one probability band
+for one wind threshold at one issuance time.
+
+```{python}
+#| label: table-structure
+with engine.connect() as conn:
+    stats = pd.read_sql("""
+        SELECT
+            count(*) as n_rows,
+            count(DISTINCT issued_time) as n_issuances,
+            min(issued_time) as min_time,
+            max(issued_time) as max_time
+        FROM storms.nhc_wsp_polygon
+    """, conn)
+
+print(f"Rows: {stats.iloc[0]['n_rows']:,}")
+print(f"Issuances: {stats.iloc[0]['n_issuances']}")
+print(f"Date range: {stats.iloc[0]['min_time']} to {stats.iloc[0]['max_time']}")
+```
+
+Each issuance produces up to 33 rows: 3 wind thresholds (34, 50, 64 kt)
+x 11 probability bands (0%, 5%, 10%, 20%, ... 90%). The `percentage`
+field is the lower bound of the probability band. The geometry is the
+area where the probability of exceeding the wind threshold falls within
+that band, **cumulated over the entire forecast period (~120 hours)**.
+
+```{python}
+#| label: single-issuance
+with engine.connect() as conn:
+    sample = pd.read_sql("""
+        SELECT issued_time, wind_threshold_kt, percentage,
+               ST_NPoints(geometry) as n_vertices,
+               round(ST_Area(geography(geometry))/1e6) as area_km2
+        FROM storms.nhc_wsp_polygon
+        WHERE issued_time = '2024-10-09 12:00:00'
+        ORDER BY wind_threshold_kt, percentage
+    """, conn)
+
+sample
+```
+
+### Probability bands are rings, not nested
+
+The bands tile the probability surface like concentric donuts. Each band
+only touches its immediate neighbor, with zero spatial overlap. The
+`percentage=0` band is the outer fringe (<5% probability), while
+`percentage=90` is the core (>90% probability, typically right around
+the storm center).
+
+```{python}
+#| label: ring-verification
+with engine.connect() as conn:
+    overlap = pd.read_sql("""
+        SELECT a.percentage as band_a, b.percentage as band_b,
+               ST_Intersects(a.geometry, b.geometry) as adjacent
+        FROM storms.nhc_wsp_polygon a
+        JOIN storms.nhc_wsp_polygon b
+            ON a.issued_time = b.issued_time
+            AND a.wind_threshold_kt = b.wind_threshold_kt
+            AND a.percentage < b.percentage
+        WHERE a.issued_time = '2024-10-09 12:00:00'
+        AND a.wind_threshold_kt = 34
+        AND a.geometry IS NOT NULL
+        AND b.geometry IS NOT NULL
+        ORDER BY a.percentage, b.percentage
+    """, conn)
+
+# Only adjacent bands touch
+touching = overlap[overlap["adjacent"]]
+non_adjacent_touch = touching[
+    touching["band_b"] - touching["band_a"] > 10
+]
+print(f"Band pairs checked: {len(overlap)}")
+print(f"Pairs that touch: {len(touching)}")
+print(f"Non-adjacent pairs that touch: {len(non_adjacent_touch)}")
+print("\nOnly adjacent bands touch (confirming ring structure):")
+print(touching[["band_a", "band_b"]].to_string(index=False))
+```
+
+### Multi-part polygons are common even for single storms
+
+A single storm can produce multi-part polygons (disconnected fragments)
+due to track uncertainty, coastlines, and forecast spread. This means
+`ST_NumGeometries > 1` does NOT imply multiple storms.
+
+```{python}
+#| label: multipart-check
+with engine.connect() as conn:
+    # Single-storm timestamps only
+    multipart = pd.read_sql("""
+        WITH single_storm AS (
+            SELECT w.issued_time
+            FROM storms.nhc_wsp_polygon w
+            JOIN storms.nhc_tracks_geo t
+                ON w.issued_time = t.issued_time AND t.leadtime = 0
+            GROUP BY w.issued_time
+            HAVING count(DISTINCT t.storm_id) = 1
+        )
+        SELECT
+            count(*) as total_polygons,
+            sum(CASE WHEN ST_NumGeometries(geometry) > 1
+                THEN 1 ELSE 0 END) as multipart,
+            round(100.0 * sum(CASE WHEN ST_NumGeometries(geometry) > 1
+                THEN 1 ELSE 0 END) / count(*)) as pct_multipart
+        FROM storms.nhc_wsp_polygon
+        WHERE issued_time IN (SELECT issued_time FROM single_storm)
+        AND wind_threshold_kt = 34
+        AND geometry IS NOT NULL
+    """, conn)
+
+print(f"Single-storm 34kt polygons: {multipart.iloc[0]['total_polygons']}")
+print(
+    f"Multi-part: {multipart.iloc[0]['multipart']}"
+    f" ({multipart.iloc[0]['pct_multipart']:.0f}%)"
+)
+```
+
+## Comparison with GDACS
+
+The GDACS timeline and NHC WSP polygons come from the **same upstream
+source** (NOAA NHC bulletins) but represent different products:
+
+| | GDACS Timeline | NHC WSP Polygons |
+|---|---|---|
+| **Per-storm?** | Yes (scoped to eventid) | No (basin-wide) |
+| **Probabilistic?** | No (deterministic radii) | Yes (11 probability bands) |
+| **Temporal** | Snapshot at each advisory | Cumulative over ~120h forecast |
+| **Wind thresholds** | 34, 50, 64 kt (per quadrant) | 34, 50, 64 kt |
+| **Exposure** | Pre-computed pop39/pop74 | Raw polygons (need raster overlay) |
+| **Storm ID** | Via eventid/eventname | Missing (must be inferred) |
+
+### Timestamp linkage
+
+GDACS `advisory_datetime` and DB `issued_time` are offset by a variable
+amount (3--9 hours) because GDACS records the bulletin issue time while
+the DB records the synoptic valid time. With a 9-hour tolerance window,
+linkage is 100%.
+
+```{python}
+#| label: timestamp-linkage
+from src.datasets.gdacs import get_active_cyclones, get_timeline
+
+events = get_active_cyclones(
+    from_date="2024-06-01", to_date="2024-12-31",
+    alert_levels=["red", "orange"],
+)
+
+matched_storms = 0
+matched_advisories = 0
+total_advisories = 0
+
+with engine.connect() as conn:
+    db_storms = pd.read_sql("""
+        SELECT DISTINCT t.storm_id
+        FROM storms.nhc_wsp_polygon w
+        JOIN storms.nhc_tracks_geo t
+            ON w.issued_time = t.issued_time AND t.leadtime = 0
+    """, conn)
+
+for _, ev in events.iterrows():
+    storm_name = ev["name"].rsplit("-", 1)[0].lower()
+    db_match = db_storms[
+        db_storms["storm_id"].str.startswith(f"{storm_name}_")
+    ]
+    if len(db_match) == 0:
+        continue
+
+    db_sid = db_match.iloc[0]["storm_id"]
+    try:
+        tl = get_timeline(ev["eventid"])
+        tl_actual = tl[tl["actual"].astype(str).str.lower() == "true"]
+        n_gdacs = len(tl_actual)
+
+        with engine.connect() as conn:
+            db_times = pd.read_sql(
+                """SELECT DISTINCT w.issued_time
+                FROM storms.nhc_wsp_polygon w
+                JOIN storms.nhc_tracks_geo t
+                    ON w.issued_time = t.issued_time
+                WHERE t.storm_id = %s""",
+                conn, params=(db_sid,),
+            )
+
+        n_matched = 0
+        for _, row in tl_actual.iterrows():
+            g = row["advisory_datetime"]
+            for _, d in db_times.iterrows():
+                if abs((g - d["issued_time"]).total_seconds()) <= 9 * 3600:
+                    n_matched += 1
+                    break
+
+        matched_storms += 1
+        matched_advisories += n_matched
+        total_advisories += n_gdacs
+    except Exception:
+        pass
+
+print(f"Storms linked: {matched_storms}")
+print(
+    f"Advisories matched: {matched_advisories}/{total_advisories}"
+    f" ({matched_advisories/total_advisories*100:.0f}%)"
+)
+```
+
+## Storm Attribution Challenge
+
+The WSP polygons lack a storm identifier. When multiple storms are
+active simultaneously, all their probability contributions are merged
+into a single basin-wide polygon. This creates an attribution problem.
+
+```{python}
+#| label: ambiguous-timestamps
+with engine.connect() as conn:
+    ambig = pd.read_sql("""
+        SELECT t.issued_time,
+               count(DISTINCT t.storm_id) as n_storms,
+               array_agg(DISTINCT t.storm_id) as storms,
+               array_agg(DISTINCT t.basin) as basins,
+               count(DISTINCT t.basin) as n_basins
+        FROM storms.nhc_wsp_polygon w
+        JOIN storms.nhc_tracks_geo t
+            ON w.issued_time = t.issued_time AND t.leadtime = 0
+        GROUP BY t.issued_time
+        HAVING count(DISTINCT t.storm_id) > 1
+        ORDER BY t.issued_time
+    """, conn)
+
+    n_total_times = pd.read_sql(
+        "SELECT count(DISTINCT issued_time) as n "
+        "FROM storms.nhc_wsp_polygon",
+        conn,
+    ).iloc[0]["n"]
+
+print(f"Total issuance timestamps: {n_total_times}")
+print(f"Ambiguous (multi-storm): {len(ambig)} ({len(ambig)/n_total_times*100:.0f}%)")
+print(f"  Same basin: {len(ambig[ambig['n_basins']==1])}")
+print(f"  Different basins: {len(ambig[ambig['n_basins']>1])}")
+```
+
+### Spatial attribution strategy
+
+We tested three strategies to attribute WSP polygons to individual
+storms using spatial containment (which probability band contains each
+storm's analysis position):
+
+1. **Different basins**: storms are in separate ocean basins, so the
+   MultiPolygon components are geographically distinct. Trivially
+   separable.
+
+2. **Same basin, different probability bands**: the two storm centers
+   fall in different rings of the probability surface. The higher-band
+   storm is the dominant contributor at its location.
+
+3. **Same basin, same band**: both storm centers are in the same
+   probability ring. Must check if the polygon has separate lobes
+   around each storm.
+
+```{python}
+#| label: attribution-results
+with engine.connect() as conn:
+    containment = pd.read_sql("""
+        WITH ambig_times AS (
+            SELECT t.issued_time
+            FROM storms.nhc_wsp_polygon w
+            JOIN storms.nhc_tracks_geo t
+                ON w.issued_time = t.issued_time AND t.leadtime = 0
+            GROUP BY t.issued_time
+            HAVING count(DISTINCT t.storm_id) > 1
+        )
+        SELECT t.issued_time, t.storm_id, t.basin, w.percentage
+        FROM storms.nhc_tracks_geo t
+        JOIN storms.nhc_wsp_polygon w
+            ON w.issued_time = t.issued_time
+            AND w.wind_threshold_kt = 34
+            AND w.geometry IS NOT NULL
+            AND ST_Contains(w.geometry, t.geometry)
+        WHERE t.issued_time IN (SELECT issued_time FROM ambig_times)
+        AND t.leadtime = 0
+    """, conn)
+
+# Classify each ambiguous timestamp
+results = {"diff_basin": 0, "diff_band": 0, "same_band": 0}
+
+for t in ambig["issued_time"]:
+    row = ambig[ambig["issued_time"] == t].iloc[0]
+
+    if row["n_basins"] > 1:
+        results["diff_basin"] += 1
+        continue
+
+    sub = containment[containment["issued_time"] == t]
+    storms = sub["storm_id"].unique()
+    if len(storms) < 2:
+        results["diff_band"] += 1
+        continue
+
+    bands = {
+        s: set(sub[sub["storm_id"] == s]["percentage"]) for s in storms
+    }
+    all_b = list(bands.values())
+    has_overlap = any(
+        all_b[i] & all_b[j]
+        for i in range(len(all_b))
+        for j in range(i + 1, len(all_b))
+    )
+
+    if has_overlap:
+        results["same_band"] += 1
+    else:
+        results["diff_band"] += 1
+
+total = sum(results.values())
+resolved = results["diff_basin"] + results["diff_band"]
+
+print(f"Ambiguous timestamps: {total}")
+print(
+    f"  1. Different basins (trivial):    "
+    f"{results['diff_basin']:>4} ({results['diff_basin']/total*100:.0f}%)"
+)
+print(
+    f"  2. Different bands (separable):   "
+    f"{results['diff_band']:>4} ({results['diff_band']/total*100:.0f}%)"
+)
+print(
+    f"  3. Same band (needs more work):   "
+    f"{results['same_band']:>4} ({results['same_band']/total*100:.0f}%)"
+)
+print(f"\nResolved: {resolved}/{total} = {resolved/total*100:.0f}%")
+```
+
+## Visualizations
+
+### Two-storm overlap: BERYL + CHRIS (2024-07-01)
+
+BERYL (Cat 4, 115 kt) is in the eastern Caribbean while CHRIS (TS,
+35 kt) is in the Gulf of Mexico. The WSP probability bands show
+how the two storms' probability fields appear in the same basin-wide
+product.
+
+```{python}
+#| label: viz-beryl-chris
+#| fig-cap: "34kt WSP probability bands with forecast tracks for BERYL and CHRIS. Darker blue = higher probability of exceeding 34kt winds."
+test_time = "2024-07-01 00:00:00"
+
+with engine.connect() as conn:
+    tracks = gpd.read_postgis("""
+        SELECT storm_id, valid_time, leadtime, wind_speed,
+               nature, geometry
+        FROM storms.nhc_tracks_geo
+        WHERE issued_time = %s
+        ORDER BY storm_id, leadtime
+    """, conn, geom_col="geometry", params=(test_time,))
+
+    wsp = gpd.read_postgis("""
+        SELECT percentage, geometry,
+               round(ST_Area(geography(geometry))/1e6) as area_km2
+        FROM storms.nhc_wsp_polygon
+        WHERE issued_time = %s AND wind_threshold_kt = 34
+        AND geometry IS NOT NULL
+        ORDER BY percentage
+    """, conn, geom_col="geometry", params=(test_time,))
+
+fig = go.Figure()
+
+for _, row in wsp.iterrows():
+    pct = row["percentage"]
+    opacity = 0.08 + (pct / 90) * 0.35
+    fill = f"rgba(30,80,180,{opacity:.2f})"
+    line_c = f"rgba(30,80,180,{min(opacity*2, 0.6):.2f})"
+    geom = row["geometry"]
+    parts = (
+        list(geom.geoms) if geom.geom_type == "MultiPolygon" else [geom]
+    )
+    for i, part in enumerate(parts):
+        lons, lats = part.exterior.xy
+        fig.add_trace(go.Scattermap(
+            lat=list(lats), lon=list(lons),
+            mode="lines", fill="toself", fillcolor=fill,
+            line={"width": 0.5, "color": line_c},
+            name=f"34kt {pct}% band" if i == 0 else None,
+            showlegend=(i == 0),
+            hoverinfo="text",
+            text=f"34kt >= {pct}% prob | {row['area_km2']:,.0f} km2",
+        ))
+
+storm_colors = {"beryl_na_2024": "#e63946", "chris_na_2024": "#2a9d8f"}
+for storm_id in tracks["storm_id"].unique():
+    sub = tracks[tracks["storm_id"] == storm_id].sort_values("leadtime")
+    color = storm_colors.get(storm_id, "#4444ff")
+    lats = [pt.y for pt in sub.geometry]
+    lons = [pt.x for pt in sub.geometry]
+    hovers = [
+        f"<b>{storm_id}</b><br>Valid: {r['valid_time']}<br>"
+        f"Lead: +{r['leadtime']}h | {r['wind_speed']}kt | {r['nature']}"
+        for _, r in sub.iterrows()
+    ]
+    sizes = [16 if lt == 0 else 9 for lt in sub["leadtime"]]
+    fig.add_trace(go.Scattermap(
+        lat=lats, lon=lons, mode="lines",
+        line={"width": 3, "color": color},
+        name=storm_id, hoverinfo="skip",
+    ))
+    fig.add_trace(go.Scattermap(
+        lat=lats, lon=lons, mode="markers",
+        marker={"size": sizes, "color": color},
+        text=hovers, hoverinfo="text", showlegend=False,
+    ))
+
+fig.update_layout(
+    title=dict(
+        text=(
+            "<b>BERYL + CHRIS: 34kt WSP Bands</b><br>"
+            "<span style='font-size:12px'>"
+            f"Issuance: {test_time}</span>"
+        ),
+        font_size=15,
+    ),
+    map={"style": "carto-positron",
+         "center": {"lat": 18, "lon": -75}, "zoom": 3},
+    height=700,
+    margin={"l": 20, "r": 20, "t": 70, "b": 20},
+    legend={"yanchor": "top", "y": 0.98, "x": 0.01,
+            "bgcolor": "rgba(255,255,255,0.85)"},
+)
+fig.show()
+```
+
+### Single storm reference: MILTON pre-landfall
+
+For comparison, this shows what the probability bands look like for a
+single storm. Note that even with one storm, the polygon can have
+multiple disconnected parts.
+
+```{python}
+#| label: viz-milton-solo
+#| fig-cap: "34kt WSP probability bands with forecast track for MILTON (pre-Florida landfall). Multi-part polygons visible even with a single storm."
+test_time2 = "2024-10-09 12:00:00"
+
+with engine.connect() as conn:
+    tracks2 = gpd.read_postgis("""
+        SELECT storm_id, valid_time, leadtime, wind_speed,
+               nature, geometry
+        FROM storms.nhc_tracks_geo
+        WHERE issued_time = %s
+        ORDER BY storm_id, leadtime
+    """, conn, geom_col="geometry", params=(test_time2,))
+
+    wsp2 = gpd.read_postgis("""
+        SELECT percentage, geometry,
+               round(ST_Area(geography(geometry))/1e6) as area_km2
+        FROM storms.nhc_wsp_polygon
+        WHERE issued_time = %s AND wind_threshold_kt = 34
+        AND geometry IS NOT NULL
+        ORDER BY percentage
+    """, conn, geom_col="geometry", params=(test_time2,))
+
+fig2 = go.Figure()
+
+for _, row in wsp2.iterrows():
+    pct = row["percentage"]
+    opacity = 0.08 + (pct / 90) * 0.35
+    fill = f"rgba(30,80,180,{opacity:.2f})"
+    line_c = f"rgba(30,80,180,{min(opacity*2, 0.6):.2f})"
+    geom = row["geometry"]
+    parts = (
+        list(geom.geoms) if geom.geom_type == "MultiPolygon" else [geom]
+    )
+    for i, part in enumerate(parts):
+        lons, lats = part.exterior.xy
+        fig2.add_trace(go.Scattermap(
+            lat=list(lats), lon=list(lons),
+            mode="lines", fill="toself", fillcolor=fill,
+            line={"width": 0.5, "color": line_c},
+            name=f"34kt {pct}% band" if i == 0 else None,
+            showlegend=(i == 0),
+            hoverinfo="text",
+            text=f"34kt >= {pct}% prob | {row['area_km2']:,.0f} km2",
+        ))
+
+for storm_id in tracks2["storm_id"].unique():
+    sub = tracks2[
+        tracks2["storm_id"] == storm_id
+    ].sort_values("leadtime")
+    lats = [pt.y for pt in sub.geometry]
+    lons = [pt.x for pt in sub.geometry]
+    hovers = [
+        f"<b>{storm_id}</b><br>Valid: {r['valid_time']}<br>"
+        f"Lead: +{r['leadtime']}h | {r['wind_speed']}kt | {r['nature']}"
+        for _, r in sub.iterrows()
+    ]
+    sizes = [16 if lt == 0 else 9 for lt in sub["leadtime"]]
+    fig2.add_trace(go.Scattermap(
+        lat=lats, lon=lons, mode="lines",
+        line={"width": 3, "color": "#e63946"},
+        name=storm_id, hoverinfo="skip",
+    ))
+    fig2.add_trace(go.Scattermap(
+        lat=lats, lon=lons, mode="markers",
+        marker={"size": sizes, "color": "#e63946"},
+        text=hovers, hoverinfo="text", showlegend=False,
+    ))
+
+fig2.update_layout(
+    title=dict(
+        text=(
+            "<b>MILTON-24: 34kt WSP Bands (single storm)</b><br>"
+            "<span style='font-size:12px'>"
+            f"Issuance: {test_time2} (pre-landfall)</span>"
+        ),
+        font_size=15,
+    ),
+    map={"style": "carto-positron",
+         "center": {"lat": 26, "lon": -84}, "zoom": 4},
+    height=700,
+    margin={"l": 20, "r": 20, "t": 70, "b": 20},
+    legend={"yanchor": "top", "y": 0.98, "x": 0.01,
+            "bgcolor": "rgba(255,255,255,0.85)"},
+)
+fig2.show()
+```
+
+## Key Findings
+
+1. **WSP polygons are basin-wide**, not per-storm. The NOAA product
+   merges all active storms into a single probability surface per
+   issuance.
+
+2. **Probability bands are non-overlapping rings** that tile the
+   probability surface concentrically.
+
+3. **Multi-part polygons are normal** even for single storms (66% of
+   single-storm 34kt polygons have multiple fragments).
+
+4. **Spatial attribution resolves ~76% of ambiguous timestamps**:
+   50% via basin separation, 26% via different probability bands. The
+   remaining 24% have both storm centers in the same band and require
+   more sophisticated decomposition or -- ideally -- adding a storm
+   identifier at the ingestion stage.
+
+5. **GDACS timeline and DB WSP data are linkable** via timestamp
+   matching (+-9h tolerance, 100% match rate) and storm name. They
+   originate from the same NOAA NHC bulletins but represent different
+   products: deterministic per-storm radii (GDACS) vs probabilistic
+   basin-wide fields (WSP).
