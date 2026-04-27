@@ -115,13 +115,13 @@ disagree, **trust this section.**
 | PDF says | Live reality | Why it matters |
 |---|---|---|
 | `GET /types` | `GET /hazards/types` returns `[{id, name}, …]`; the `/types` path returns 500 `"No static resource types."` | Code generated from the PDF will 500 on first call |
-| No archive endpoint | `GET /hazards?status=ARCHIVED` works (also `?active=false`) | But archive is shallow — see below |
+| `/hazards` returns active hazards only; no archive | Wrong on both counts. There is no archive endpoint, and `/hazards` returns currently-active hazards **plus** events that ended within roughly the last ~30 days. The `status` query parameter is silently ignored — `?status=ARCHIVED`, `?status=ACTIVE`, and `?status=BOGUSVALUE` all return roughly the same dataset. | What looks like an "archive" is just the default behaviour — see "What `/hazards` actually returns" below |
 | `name`/`description` use RFC 5646 (`en-US`) | Live `locale` is `en` (no region subtag) | Don't filter on `en-US` |
 | List-view `category = EVENT` | Live cyclone has `category = "RESPONSE"` | `category` is a status enum, not always `EVENT` |
 | (silent) | `endedAt = 32503679999` (year-2999 epoch sentinel) for active hazards | Use `< 32503679999` to detect "actually ended" |
 | (silent) | Detail object's top-level `uuid` ≠ `hazard.uuid` | Top-level `uuid` is a state/version ID. Use `hazard.uuid` as the stable hazard identifier. |
 | (silent) | Many scalar fields are wrapped in Avro union envelopes (`{"string": v}`, `{"long": v}`, …) | Need an unwrap helper before downstream code touches the detail object |
-| (silent) | `?startedAfter` / `?updatedAfter` query params are silently ignored | No incremental-poll filter — must dedupe locally by `uuid` + `updatedAt` |
+| (silent) | `?startedAfter` / `?updatedAfter` / `?status=` query params are all silently ignored | No incremental-poll filter — must dedupe locally by `(uuid, updatedAt)` |
 
 ### Working endpoint inventory
 
@@ -130,7 +130,7 @@ disagree, **trust this section.**
 | `GET /actuator/info` | none | `{build: {artifact, name, time, version, group}}` | Confirmed v1.2.0, deploy 2026-04-21 |
 | `GET /actuator/health` | none | `{status: "UP"}` | |
 | `GET /hazards/types` | required | `[{id, name}, …]` (33 entries — full list below) | Authoritative source for `?types=` values |
-| `GET /hazards` | required | GeoJSON FeatureCollection of active hazards | `?types=CYCLONE` filter works (case-insensitive). `?status=ARCHIVED` returns archive instead. Date filters silently ignored. |
+| `GET /hazards` | required | GeoJSON FeatureCollection of currently-active hazards plus those that ended within roughly the last ~30 days | `?types=CYCLONE` filter works (case-insensitive). `?status=` and date filters are silently ignored — see "What `/hazards` actually returns" below. |
 | `GET /hazards/{uuid}` | required | Detail object (see below) | Works for both active and archived hazards |
 
 **No pagination.** `/hazards?status=ARCHIVED` returns all 577 features in a
@@ -385,13 +385,60 @@ thresholds (a la GDACS `pop_34kt`/`pop_64kt` cumulative bands or ADAM
 `pop_60/90/120kmh` discrete bands) — cannot be confirmed from these two
 samples.** Revisit when a landfalled cyclone is in the feed.
 
-### Archive characterization
+### What `/hazards` actually returns
 
-Total: **577 archived hazards** as of 2026-04-27.
-Date range: **2024-03-19 → 2026-04-29** (≈25 months).
-Delivered as a single ~340 KB JSON response, no pagination.
+There is no separate archive endpoint. The default `/hazards` call returns a
+single ~340 KB JSON document containing **all currently-active hazards plus
+those that ended within roughly the last ~30 days**. The `status` query
+parameter is silently ignored:
 
-By type:
+| Query | Feature count |
+|---|---:|
+| `/hazards` (no params) | 571 |
+| `/hazards?status=ACTIVE` | 571 |
+| `/hazards?status=ARCHIVED` | 577 |
+| `/hazards?status=BOGUSVALUE` | 571 (HTTP 200) |
+
+The 571↔577 drift is real events being added/removed between calls (a few
+minutes apart). All four queries return the same dataset.
+
+**Working retention model** — verified against the 577-feature snapshot
+probed 2026-04-27:
+
+```
+visible in /hazards iff (endedAt is sentinel) OR (now - endedAt < ~30 days)
+```
+
+- **573 events** had a real `endedAt`; **4** had the year-2999 sentinel
+  (still active) — Sinlaku (CYCLONE), 1 COMBAT, 2 MANMADE.
+- `startedAt` ranges from 2024-03-19 to today, but **that range is
+  misleading**. The two oldest events are long-runners that haven't ended
+  yet:
+
+  ```
+  started=2024-03-19  ended=2027-01-01 (placeholder)  CIVILUNREST  Haiti
+  started=2024-04-11  ended=2026-05-02 (next week)    DROUGHT      Western US
+  ```
+
+  They're visible because they're still open (or just-about-to-end), not
+  because PDC archives 2-year-old hazards.
+
+- The eye-catching cohort of 86 events with `startedAt = 2025-04-09 to 25`
+  is the same story: those are global flood-monitoring events that PDC kept
+  open for exactly 12 months and that closed on 2026-04-27 or 2026-04-28 —
+  i.e. within the last 24-48 hours. Their long open-state, not their start
+  date, is what kept them in the feed.
+
+The exact window edges aren't documented and would need to be confirmed by
+re-polling weekly. But the model above explains the entire 577-feature
+distribution end-to-end.
+
+**Operational implication:** daily polling has a generous cushion. A
+landfalled cyclone typically dissipates within 1-3 weeks, so we'd see it in
+the feed for ~30 more days after it ends. Missing a few polling days won't
+cause data loss as long as we re-poll within the grace window.
+
+**Type distribution (full 577-feature sample):**
 
 | Type | Count | Type | Count |
 |---|---:|---|---:|
@@ -407,24 +454,26 @@ By type:
 | TORNADO | 2 | MANMADE | 2 |
 | MARINE | 1 | **CYCLONE** | **1** |
 
-The single archived CYCLONE is Sinlaku — the same storm currently active.
-**PDC's archive is essentially empty for tropical cyclones.** Combined with
-the ~25-month depth, this means PDC can supply zero historical CERF-window
-cyclones (CERF starts 2006). Daily-poll-and-accumulate from the current
-moment onward is the only viable strategy.
+The single CYCLONE is Sinlaku — currently active, not archived. The
+distribution is heavily biased toward US-domain weather types
+(FLOOD/WILDFIRE/STORM/HIGHWIND/SEVEREWEATHER = 482 of 577 = 84%). Combined
+with the ~30-day post-end retention, **PDC supplies essentially zero
+historical cyclones** — the entire historical record must be built locally
+by daily polling.
 
-**Date filters** (`?startedAfter=YYYY-MM-DD`, `?updatedAfter=<epoch>`,
-`?endedAfter=…`) are silently ignored — they don't return errors but the
-response is byte-identical to the unfiltered call. So incremental polling
-means: pull the full list and dedupe by `(uuid, updatedAt)` against
-locally-stored state.
+**No pagination.** Single ~340 KB response, no `Link` / `X-Total-Count` /
+cursor headers. If the rolling window grows substantially (e.g. another
+year-long flood cohort closing in a single week), we have no documented way
+to page. Date filters (`?startedAfter=…`, `?updatedAfter=…`,
+`?endedAfter=…`) and `?status=…` are all silently ignored, so incremental
+polling means: pull the full list and dedupe locally by `(uuid, updatedAt)`.
 
 ### Sample UUIDs for re-fetching
 
 | Hazard | UUID | Useful for |
 |---|---|---|
 | Tropical Storm Sinlaku (active) | `e621323a-1d6e-4b3c-9413-e72800dab5d4` | Live cyclone schema (RICHTER, manual source, all-zero exposure pre-landfall) |
-| Flood, Northern Puerto Rico (archived) | `9175d060-4f6b-49f9-9335-950dfbcb0caa` | Populated `totalByCountry` (PRI) — exposure-schema reference |
+| Flood, Northern Puerto Rico (recently-ended) | `9175d060-4f6b-49f9-9335-950dfbcb0caa` | Populated `totalByCountry` (PRI) — exposure-schema reference. May drop out of the feed once it's ~30 days past `endedAt`. |
 | Sinlaku incident UUID (inside detail) | `03726c63-a8b9-4403-b5f0-442b5f8487b5` | Cross-reference for `incident.uuid` semantics |
 
 ### Open questions still unresolved
@@ -438,10 +487,13 @@ locally-stored state.
    for both samples seen. Need a landfalled cyclone observation to confirm
    whether multiple bucket entries appear and what `level` values map to
    (wind thresholds? Saffir-Simpson?).
-3. **Archive retention policy.** 577 hazards over ~25 months ≈ 23/month.
-   Whether older hazards age out, or the archive grows monotonically, isn't
-   knowable from a single snapshot. Worth asking PDC directly or polling the
-   archive over a few weeks to compare.
+3. **Confirm the ~30-day post-end retention window.** The working model
+   ("visible iff active OR ended <~30 days ago") explains the current
+   snapshot, but the exact window edges aren't documented. Re-poll weekly
+   for a month and watch which uuids drop off. Particularly worth checking:
+   do PDC's "long open-state" cohorts (year-long floods, multi-year
+   droughts) close on a fixed schedule (the 86 floods all closing on
+   2026-04-27/28 hint at this), or based on observed data?
 4. **Multi-country events.** All exposure samples we have happen to be
    single-country. The shape `totalByCountry: [{country, admin0, …}, …]`
    strongly suggests per-country rows for cross-border events, but not yet
@@ -451,10 +503,14 @@ locally-stored state.
 
 Replaces / supersedes the implications above this section.
 
-1. **Daily-poll-and-accumulate is the only viable design.** Archive is
-   ~25 months deep with 1 cyclone. Pattern matches the GDACS *daily monitor*
-   in `src/gdacs_monitor_email.py` more than the GDACS *historical exposure*
-   pipeline.
+1. **Daily-poll-and-accumulate is the only viable design.** There is no
+   archive — `/hazards` returns currently-active hazards plus those that
+   ended in roughly the last ~30 days. The full historical record must be
+   built locally. Daily cadence has a generous cushion (a landfalled cyclone
+   stays visible for ~30 days after it dissipates), so the pipeline is
+   forgiving of missed polls within the grace window. Pattern matches the
+   GDACS *daily monitor* in `src/gdacs_monitor_email.py` more than the
+   GDACS *historical exposure* pipeline.
 2. **Schema target alignment is favourable.** PDC's
    `totalByCountry[].country` is ISO3, joining cleanly with the existing
    `(event_id, iso3, ...)` GDACS shape. Map `population.total.value` →
