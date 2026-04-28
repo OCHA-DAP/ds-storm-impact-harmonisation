@@ -330,7 +330,7 @@ Each leaf is a `{value, valueFormatted, valueFormattedNoTrunc, valueRounded}`
 quad. `value` is the float; `valueFormatted` is human-readable
 ("3.13 Billion"); `valueFormattedNoTrunc` is comma-grouped without truncation.
 
-**Real per-country entry** — Sinlaku has all-zero exposure (still pre-landfall),
+**Real per-country entry** — Sinlaku has all-zero exposure despite the storm having tracked over Guam and Northern Mariana Islands per GDACS (manual-source PDC entries appear to skip the auto-compute),
 so this comes from the Puerto Rico flood `9175d060-…` for a populated example:
 
 ```json
@@ -472,7 +472,7 @@ polling means: pull the full list and dedupe locally by `(uuid, updatedAt)`.
 
 | Hazard | UUID | Useful for |
 |---|---|---|
-| Tropical Storm Sinlaku (active) | `e621323a-1d6e-4b3c-9413-e72800dab5d4` | Live cyclone schema (RICHTER, manual source, all-zero exposure pre-landfall) |
+| Tropical Storm Sinlaku (manually-entered, post-event "Response Support" record) | `e621323a-1d6e-4b3c-9413-e72800dab5d4` | Live cyclone schema (RICHTER, `sourceName = "PDC Manual Hazard"`, `category = RESPONSE`, all-zero exposure despite the storm tracking over Guam and Mariana Islands per GDACS). Entered 2026-04-20 16:30 UTC; storm itself ended 2026-04-19 per JTWC. |
 | Flood, Northern Puerto Rico (recently-ended) | `9175d060-4f6b-49f9-9335-950dfbcb0caa` | Populated `totalByCountry` (PRI) — exposure-schema reference. May drop out of the feed once it's ~30 days past `endedAt`. |
 | Sinlaku incident UUID (inside detail) | `03726c63-a8b9-4403-b5f0-442b5f8487b5` | Cross-reference for `incident.uuid` semantics |
 
