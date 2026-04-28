@@ -42,6 +42,39 @@ is no exposure subendpoint, no version history, no incidents endpoint.
 The detail object returned by `/hazards/{uuid}` is everything PDC
 exposes for a given hazard via this API.
 
+```{python}
+#| label: setup
+#| output: false
+import json
+from pathlib import Path
+
+import pandas as pd
+import plotly.graph_objects as go
+
+CACHE = Path("_cache/08-pdc-evaluation")
+pdc = json.loads((CACHE / "pdc_sinlaku.json").read_text())
+gdacs_tl = pd.read_csv(
+    CACHE / "gdacs_timeline.csv", parse_dates=["advisory_datetime"]
+)
+
+
+def wind_color(ms):
+    """Saffir-Simpson-ish color band for wind speed in m/s."""
+    if pd.isna(ms): return "#cccccc"
+    if ms < 17.5: return "#5ebaff"   # TD
+    if ms < 25.0: return "#00faf4"   # TS
+    if ms < 33.0: return "#ffffcc"   # Cat 1
+    if ms < 43.0: return "#ffe775"   # Cat 2
+    if ms < 50.0: return "#ffc140"   # Cat 3
+    if ms < 58.0: return "#ff8f20"   # Cat 4
+    return "#ff6060"                  # Cat 5
+```
+
+The cells below load the cached snapshots populated by
+`scripts/cache_pdc_sinlaku.py`. Re-run that script to refresh against
+live data (note that PDC's rolling-window feed will rotate Sinlaku out
+within roughly 30 days of dissipation).
+
 ## Sinlaku in PDC vs GDACS
 
 When we probed the API there was exactly one active cyclone in the PDC
@@ -56,7 +89,7 @@ on this storm using the script at
 |---|---|---|
 | Identity | UUID `e621323a-...`, name `"Super Typhoon - Sinlaku (Response Support)"` | event ID `1001270`, name `"SINLAKU-26"` |
 | Lifecycle coverage | Single Point at 15.17°N, 145.58°E (near Guam), recorded 2026-04-20 16:30 UTC. Not refreshed since. | 44 actual advisories at 6-hour cadence from Apr 9 to Apr 19, plus 2 forecast advisories. Tracked from formation to dissipation. |
-| Storm-ended status | `hazard.endedAt = 32503679999` (year-2999 sentinel, still marked active) | `is_current = False`, `todate = 2026-04-19T18:00` (storm ended Apr 19) |
+| Storm-ended status | `hazard.endedAt = 32503679999` (decodes to `2999-12-31T23:59:59 UTC`, used as sentinel for "still active") | `is_current = False`, `todate = 2026-04-19T18:00` (storm ended Apr 19) |
 | Severity (peak) | `severity = WARNING`, `category = RESPONSE` | `alert_level = Red`, `severity_kmh = 287` (peak forecast km/h) |
 | Aggregate population exposed | 0 (`exposure.data.population.total.value`) | (cumulative inside wind buffers) |
 | Per-country exposure | `totalByCountry: []` (empty) | Guam 166,535 (within 39 kt buffer); Northern Mariana Islands 41,579 (within both 39 kt and 74 kt) |
@@ -77,18 +110,19 @@ the storm's peak-intensity area where humanitarian impact would be
 focused. The `sourceName = "PDC Manual Hazard"` value (found at
 `incident.snapshot.properties.map.sourceName` in the detail JSON, with
 empty `sourceUrl` and `rawMessage` siblings) confirms an analyst
-typed in the record manually rather than the system ingesting an RSMC
-bulletin. This is consistent with a response-coordination
-interpretation: an analyst created a coordination record after the
-meteorological event, not a real-time tracker.
+typed in the record manually rather than the system ingesting an
+automated bulletin from JTWC, NHC, or another official forecast center.
+This is consistent with a response-coordination interpretation: an
+analyst created a coordination record after the meteorological event,
+not a real-time tracker.
 
 The PDF documents `category = EVENT` as the typical value for a
 hazard and lists `features` as the place where a cyclone track would
 live. Sinlaku has `category = RESPONSE` and only a single Point in
 `features`. We do not yet know whether `category = EVENT` cyclones
-with automated RSMC ingestion would carry per-advisory tracks or
-populated exposure. Sinlaku is a manual response-support entry, so
-we cannot generalise from it.
+fed automatically from a forecast center would carry per-advisory
+tracks or populated exposure. Sinlaku is a manual response-support
+entry, so we cannot generalise from it.
 
 The PDC exposure schema is rich on paper. Where it does run (verified
 on the Puerto Rico flood `9175d060-4f6b-49f9-9335-950dfbcb0caa`,
@@ -97,6 +131,70 @@ with ISO3 codes, granular age bands, vulnerability classes, and
 capital exposure split by schools and hospitals. The shape joins
 cleanly to our existing GDACS schema on `(country, eventid)`. None of
 that helps for Sinlaku where every population value is zero.
+
+```{python}
+#| label: fig-track
+#| fig-cap: "GDACS captured 44 actual advisories (colored by intensity, hover for details) plus 2 forecast points along Sinlaku's path Apr 9 to Apr 19. PDC has a single Point near Guam (red star), recorded Apr 20 after the storm dissipated."
+actual = gdacs_tl[gdacs_tl["actual"].astype(str).str.lower() == "true"]
+forecast = gdacs_tl[gdacs_tl["actual"].astype(str).str.lower() != "true"]
+
+fig = go.Figure()
+fig.add_trace(go.Scattermap(
+    lat=actual["latitude"], lon=actual["longitude"],
+    mode="lines", line={"width": 2, "color": "#666"},
+    name="GDACS actual track", hoverinfo="skip",
+))
+for _, r in actual.iterrows():
+    fig.add_trace(go.Scattermap(
+        lat=[r["latitude"]], lon=[r["longitude"]],
+        mode="markers",
+        marker={"size": 9, "color": wind_color(r["wind_speed"])},
+        text=(
+            f"GDACS adv {int(r['advisory_number'])}<br>"
+            f"{r['advisory_datetime']}<br>"
+            f"wind {r['wind_speed']:.1f} m/s "
+            f"({r['wind_speed']*3.6:.0f} km/h)<br>"
+            f"pop39 {r['pop39']:,.0f}, pop74 {r['pop74']:,.0f}"
+        ),
+        hoverinfo="text", showlegend=False,
+    ))
+if len(forecast):
+    fig.add_trace(go.Scattermap(
+        lat=forecast["latitude"], lon=forecast["longitude"],
+        mode="markers+lines",
+        marker={"size": 8, "color": "#888", "opacity": 0.5},
+        line={"width": 1, "color": "#aaa"},
+        name="GDACS forecast",
+        text=forecast["advisory_datetime"].astype(str),
+        hoverinfo="text",
+    ))
+fig.add_trace(go.Scattermap(
+    lat=[pdc["latitude"]], lon=[pdc["longitude"]],
+    mode="markers+text",
+    marker={"size": 22, "color": "red", "symbol": "star"},
+    text=["PDC (single point)"], textposition="top right",
+    textfont={"color": "red", "size": 13},
+    name="PDC", hoverinfo="text",
+    hovertext=f"PDC point<br>{pdc['latitude']:.3f}, {pdc['longitude']:.3f}",
+))
+fig.update_layout(
+    map={
+        "style": "carto-positron",
+        "center": {"lat": actual["latitude"].mean(),
+                   "lon": actual["longitude"].mean()},
+        "zoom": 3,
+    },
+    height=550, margin={"r": 0, "t": 10, "l": 0, "b": 0},
+    legend={"yanchor": "top", "y": 0.99, "xanchor": "left", "x": 0.01},
+)
+fig
+```
+
+The visual gap between the red star and the upper end of the GDACS
+track is the entire post-Apr-20 evolution of the storm. Neither system
+captured it, because both effectively stopped: GDACS issued no further
+actual advisories after Apr 19 18:00, and PDC's single-point entry was
+made on Apr 20 16:30 with no subsequent refresh.
 
 ### The three geometries
 
@@ -120,8 +218,59 @@ Two takeaways:
    For Sinlaku, `features` is *not* a cyclone track as the PDF
    suggests with "(e.g. cyclone track)"; it is an incident point plus
    a copy of the impact polygon. Whether `features` carries actual
-   track points for an RSMC-sourced cyclone is one of the questions
-   we need PDC to answer.
+   track points for an automatically-ingested cyclone (one fed by
+   JTWC, NHC, or another forecast center) is one of the questions we
+   need PDC to answer.
+
+```{python}
+#| label: fig-polygons
+#| fig-cap: "PDC's three geometries for Sinlaku, overlaid. impactGeometry (filled blue) and the polygon inside features.geoJson have identical coordinates and visually coincide. alertGeometry (orange outline) is a distinct, broader shape, consistent with the PDF describing it as 'broader than impact'. The red star is the incident Point from features.geoJson."
+
+def poly_coords(feature_collection):
+    polys = [
+        f for f in feature_collection["features"]
+        if f["geometry"]["type"] == "Polygon"
+    ]
+    return polys[0]["geometry"]["coordinates"][0] if polys else []
+
+impact_xy = poly_coords(pdc["impactGeometry"]["geoJson"])
+alert_xy = poly_coords(pdc["alertGeometry"]["geoJson"])
+
+fig = go.Figure()
+fig.add_trace(go.Scattermap(
+    lat=[c[1] for c in impact_xy],
+    lon=[c[0] for c in impact_xy],
+    mode="lines", fill="toself",
+    fillcolor="rgba(33, 102, 172, 0.30)",
+    line={"width": 1.5, "color": "#2166ac"},
+    name="impactGeometry (= polygon inside features.geoJson)",
+))
+fig.add_trace(go.Scattermap(
+    lat=[c[1] for c in alert_xy],
+    lon=[c[0] for c in alert_xy],
+    mode="lines",
+    line={"width": 2, "color": "#d6604d"},
+    name="alertGeometry (broader, distinct shape)",
+))
+fig.add_trace(go.Scattermap(
+    lat=[pdc["latitude"]], lon=[pdc["longitude"]],
+    mode="markers+text",
+    marker={"size": 18, "color": "red", "symbol": "star"},
+    text=["incident Point"], textposition="top right",
+    textfont={"color": "red", "size": 12},
+    name="incident Point (from features.geoJson)",
+))
+fig.update_layout(
+    map={
+        "style": "carto-positron",
+        "center": {"lat": pdc["latitude"], "lon": pdc["longitude"]},
+        "zoom": 4,
+    },
+    height=500, margin={"r": 0, "t": 10, "l": 0, "b": 0},
+    legend={"yanchor": "top", "y": 0.99, "xanchor": "left", "x": 0.01},
+)
+fig
+```
 
 ## Structural limitations
 
@@ -163,22 +312,22 @@ send to PDC's team.
 > things we cannot resolve from the documentation alone. Could you
 > help us with the following?
 >
-> 1. **Manual vs RSMC ingestion for cyclones.** The Sinlaku entry
->    (UUID `e621323a-1d6e-4b3c-9413-e72800dab5d4`) has
+> 1. **Manual vs automated ingestion for cyclones.** The Sinlaku
+>    entry (UUID `e621323a-1d6e-4b3c-9413-e72800dab5d4`) has
 >    `incident.snapshot.properties.map.sourceName = "PDC Manual Hazard"`
 >    with empty `sourceUrl` and `rawMessage`. Are tropical cyclones
->    typically ingested automatically from JTWC / NHC / other RSMCs,
->    or is manual entry the standard path? When would an RSMC-sourced
->    cyclone appear in the API?
+>    typically ingested automatically from JTWC / NHC / another
+>    official forecast center, or is manual entry the standard path?
+>    When would an automatically-ingested cyclone appear in the API?
 >
 > 2. **Per-advisory tracks for cyclones.** The PDF describes
 >    `features` as a GeoJSON FeatureCollection with `(e.g. cyclone
 >    track)`. For Sinlaku, `features.geoJson` contains only one Point
 >    (the incident location) and one Polygon with coordinates
->    identical to `impactGeometry`. For an RSMC-sourced cyclone, does
->    `features` carry a multi-point track of historical advisory
->    positions, and if so what is the schema for each track point
->    (timestamp, wind speed, pressure, radii)?
+>    identical to `impactGeometry`. For an automatically-ingested
+>    cyclone, does `features` carry a multi-point track of historical
+>    advisory positions, and if so what is the schema for each track
+>    point (timestamp, wind speed, pressure, radii)?
 >
 > 3. **Exposure compute conditions.** For Sinlaku, every value in
 >    `exposure.data` is zero (including `population.total.value` and
@@ -198,8 +347,9 @@ send to PDC's team.
 >    ingestion path?
 >
 > 5. **`endedAt` lifecycle.** Sinlaku has
->    `hazard.endedAt = 32503679999` (year-2999 epoch sentinel) and
->    remains in the `/hazards` response, but per JTWC the storm
+>    `hazard.endedAt = 32503679999` (which decodes to
+>    `2999-12-31T23:59:59 UTC`, used as a sentinel for "still active")
+>    and remains in the `/hazards` response, but per JTWC the storm
 >    dissipated around 2026-04-19. What conditions cause `endedAt` to
 >    be set to a real timestamp, and what is the lifecycle for moving
 >    a hazard out of the active feed?
@@ -219,20 +369,22 @@ send to PDC's team.
 >    Relatedly, is there a pagination mechanism we should be using if
 >    the response grows large?
 >
-> 8. **Joining to IBTrACS.** For an RSMC-sourced cyclone, where in
->    the response would we find the JTWC ATCF ID or NHC identifier,
->    so we can join PDC events to IBTrACS storm IDs?
+> 8. **Joining to IBTrACS.** For an automatically-ingested cyclone,
+>    where in the response would we find the JTWC ATCF ID or NHC
+>    identifier, so we can join PDC events to IBTrACS storm IDs?
 >
 > Many thanks. Happy to share our full probe notes if useful.
+
+## Recommendation
 
 Don't integrate PDC into the cyclone exposure pipeline at this stage.
 The structural reason is that PDC's only observable cyclone is a
 single response-coordination snapshot: one Point, recorded after the
 storm ended, no per-advisory data, zero exposure values. Even if a
-future RSMC-sourced cyclone has populated exposure and a real track
-in `features`, the rolling-window retention model (no historical
-backfill) rules out using PDC for analytical work going back to
-CERF's 2006 baseline.
+future automatically-ingested cyclone has populated exposure and a
+real track in `features`, the rolling-window retention model (no
+historical backfill) rules out using PDC for analytical work going
+back to CERF's 2006 baseline.
 
 For real-time monitoring, GDACS already provides what we need:
 per-advisory tracking through the storm life cycle, cumulative

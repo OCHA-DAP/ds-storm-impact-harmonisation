@@ -44,8 +44,9 @@ Book chapters that fetch from external APIs cache responses locally to avoid re-
 | Chapter | Cache script | Cache dir |
 |---|---|---|
 | `06-gdacs-episodes.qmd` | `scripts/cache_gdacs_episodes.py` | `book/_cache/06-gdacs-episodes/` |
+| `08-pdc-evaluation.qmd` | `scripts/cache_pdc_sinlaku.py` | `book/_cache/08-pdc-evaluation/` |
 
-To refresh a cache: `uv run python scripts/cache_gdacs_episodes.py`
+To refresh a cache: `uv run python scripts/<cache-script>.py`
 
 The `.qmd` files load from cache by default. Live API call code is kept in `eval: false` cells for reference.
 

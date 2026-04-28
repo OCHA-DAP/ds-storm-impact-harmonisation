@@ -118,7 +118,7 @@ disagree, **trust this section.**
 | `/hazards` returns active hazards only; no archive | Wrong on both counts. There is no archive endpoint, and `/hazards` returns currently-active hazards **plus** events that ended within roughly the last ~30 days. The `status` query parameter is silently ignored — `?status=ARCHIVED`, `?status=ACTIVE`, and `?status=BOGUSVALUE` all return roughly the same dataset. | What looks like an "archive" is just the default behaviour — see "What `/hazards` actually returns" below |
 | `name`/`description` use RFC 5646 (`en-US`) | Live `locale` is `en` (no region subtag) | Don't filter on `en-US` |
 | List-view `category = EVENT` | Live cyclone has `category = "RESPONSE"` | `category` is a status enum, not always `EVENT` |
-| (silent) | `endedAt = 32503679999` (year-2999 epoch sentinel) for active hazards | Use `< 32503679999` to detect "actually ended" |
+| (silent) | `endedAt = 32503679999` (= `2999-12-31T23:59:59 UTC`, a sentinel for "still active") | Use `< 32503679999` to detect "actually ended" |
 | (silent) | Detail object's top-level `uuid` ≠ `hazard.uuid` | Top-level `uuid` is a state/version ID. Use `hazard.uuid` as the stable hazard identifier. |
 | (silent) | Many scalar fields are wrapped in Avro union envelopes (`{"string": v}`, `{"long": v}`, …) | Need an unwrap helper before downstream code touches the detail object |
 | (silent) | `?startedAfter` / `?updatedAfter` / `?status=` query params are all silently ignored | No incremental-poll filter — must dedupe locally by `(uuid, updatedAt)` |
@@ -210,7 +210,8 @@ The list spans many non-natural-hazard types (`ACCIDENT`, `ACTIVESHOOTER`,
 }
 ```
 
-Note `category = "RESPONSE"` and the year-2999 `endedAt` sentinel.
+Note `category = "RESPONSE"` and the sentinel `endedAt = 32503679999`
+(= `2999-12-31T23:59:59 UTC`, used to mark "still active").
 
 ### Detail object: top-level shape
 
@@ -293,10 +294,11 @@ normalize this before downstream code touches it.
 
 `incident.sourceRecordId` for live Sinlaku is a PDC-internal UUID, not an NHC
 ATCF / JTWC ID. The `sourceName` is `"PDC Manual Hazard"` — this storm was
-manually entered, not ingested from RSMC. **So the path from PDC → IBTrACS
-SID is not yet confirmed.** It may live in `rawMessage`, `sourceUrl`, or
-`sourceResourceLocations` for an RSMC-sourced cyclone; revisit when one
-appears in the feed.
+manually entered, not ingested from an official forecast center
+(JTWC, NHC, etc.). **So the path from PDC → IBTrACS SID is not yet
+confirmed.** It may live in `rawMessage`, `sourceUrl`, or
+`sourceResourceLocations` for an automatically-ingested cyclone;
+revisit when one appears in the feed.
 
 #### `exposure.data` shape (the harmonisation target)
 
@@ -409,7 +411,7 @@ probed 2026-04-27:
 visible in /hazards iff (endedAt is sentinel) OR (now - endedAt < ~30 days)
 ```
 
-- **573 events** had a real `endedAt`; **4** had the year-2999 sentinel
+- **573 events** had a real `endedAt`; **4** had the sentinel `32503679999`
   (still active) — Sinlaku (CYCLONE), 1 COMBAT, 2 MANMADE.
 - `startedAt` ranges from 2024-03-19 to today, but **that range is
   misleading**. The two oldest events are long-runners that haven't ended
@@ -479,7 +481,7 @@ polling means: pull the full list and dedupe locally by `(uuid, updatedAt)`.
 ### Open questions still unresolved
 
 1. **IBTrACS-join path for cyclones.** Sinlaku is a manual hazard with no
-   RSMC source, so we couldn't confirm whether `incident.sourceRecordId`,
+   automated forecast-center source, so we couldn't confirm whether `incident.sourceRecordId`,
    `incident.snapshot.properties.map.sourceUrl`, `rawMessage`, or
    `sourceResourceLocations` carries an NHC ATCF / JTWC ID for non-manual
    cyclones. Revisit when a non-manual cyclone appears in the feed.
@@ -518,7 +520,7 @@ Replaces / supersedes the implications above this section.
    columns once cyclone semantics are confirmed.
 3. **Avro envelope unwrap is required at load time.** Recursive unwrap on
    `{"<scalar_type>": v}` and `{"array": [...]}` dicts.
-4. **IBTrACS join deferred.** Without an RSMC-sourced cyclone in the feed
+4. **IBTrACS join deferred.** Without an automatically-ingested cyclone in the feed
    yet, we can't lock down SID resolution. Build the loader to capture
    `incident.sourceRecordId` *and* the full `incident.snapshot.properties.map`
    so we can revisit join logic without re-fetching.
