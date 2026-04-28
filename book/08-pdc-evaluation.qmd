@@ -1,0 +1,127 @@
+---
+title: "PDC Hazards API: Evaluation as a Cyclone Exposure Source"
+jupyter: ds-storm-impact
+---
+
+[Pacific Disaster Center](https://www.pdc.org/) (PDC) operates a global
+hazard-monitoring API that surfaces active disasters of many kinds,
+including tropical cyclones. We evaluated it as a candidate third
+source of cyclone exposure data, alongside ADAM (covered in the
+[ADAM, GDACS & CERF Allocation Overlap](03-appendix-adam-gdacs.qmd)
+appendix) and GDACS (covered in [Real-Time GDACS Exposure Retrieval](03-gdacs-realtime.qmd)).
+
+The technical reference for the API (endpoints, response shapes, schema
+notes, and discrepancies between the published PDF and live behaviour)
+lives in `docs/pdc_api.md` in the project repository. This chapter
+focuses on what we found during evaluation and what we recommend.
+
+## How we explored it
+
+We probed the live API on 2026-04-27 (API version 1.2.0) using the
+PDC-issued key (`PDC_API_KEY`). We started from PDC's published `PDC
+Hazards API v1.2.0` PDF and verified each documented behaviour against
+live responses. Several documented behaviours did not hold up. The full
+discrepancy table is in `docs/pdc_api.md`; the ones that mattered for
+our evaluation:
+
+- The PDF documents a `/types` endpoint; the actual path is
+  `/hazards/types`. The wrong path returns HTTP 500.
+- The PDF says `/hazards` returns active hazards only and that there is
+  no archive. Both claims are wrong: the response mixes active and
+  recently-ended hazards on a rolling window of roughly the last 30
+  days, and there is no separate archive endpoint at all.
+- The `?status=`, `?startedAfter`, and `?updatedAfter` query parameters
+  are silently ignored. Filtering by date or status is not possible
+  through the API.
+
+The OpenAPI specification at `/v3/api-docs` (auto-generated from the
+service's controllers, so authoritative) lists the entire endpoint
+surface as five operational paths: `/hazards`, `/hazards/{uuid}`,
+`/hazards/types`, plus `/actuator/info` and `/actuator/health`. There
+is no exposure subendpoint, no version history, no incidents endpoint.
+The detail object returned by `/hazards/{uuid}` is everything PDC
+exposes for a given hazard via this API.
+
+## Sinlaku in PDC vs GDACS
+
+When we probed the API there was exactly one active cyclone in the PDC
+feed: Tropical Storm Sinlaku (UUID
+`e621323a-1d6e-4b3c-9413-e72800dab5d4`), in the Western Pacific. The
+same storm was also active in GDACS at the same time (event ID
+`1001270`, name `SINLAKU-26`). We compared the two systems' reporting
+on this storm using the script at
+`artefacts/13_pdc_vs_gdacs/compare_sinlaku.py`.
+
+| Dimension | PDC reports | GDACS reports |
+|---|---|---|
+| Identity | UUID `e621323a-...`, name `"Super Typhoon - Sinlaku (Response Support)"` | event ID `1001270`, name `"SINLAKU-26"` |
+| Latest position | 15.17°N, 145.58°E (initial position near Guam) | 28.70°N, 156.10°E (current, advisory 44, far north of Japan) |
+| Updates after creation | Single static snapshot, `hazard.updatedAt` 2026-04-20 | 44 actual advisories at standard 6-hour cadence, plus 2 forecast advisories |
+| Severity / wind | `severity = WARNING`, `category = RESPONSE`, name claims "Super Typhoon" | `alert_level = Red`, `severity_kmh = 287` (peak forecast), latest actual wind 25.7 kt |
+| Aggregate population exposed | 0 | (cumulative inside wind buffers) |
+| Per-country exposure | `totalByCountry: []` (empty) | Guam 166,535 (within 39 kt buffer), Northern Mariana Islands 41,579 (within both 39 kt and 74 kt buffers) |
+| Source attribution | `sourceName = "PDC Manual Hazard"`, no source URL, no raw message | `source = "JTWC"` (Joint Typhoon Warning Center) |
+
+Two patterns drive the gap. First, PDC's Sinlaku entry has
+`sourceName = "PDC Manual Hazard"`, meaning the storm was hand-entered
+rather than ingested from an RSMC bulletin. The position was not
+refreshed after creation, no per-advisory track exists in the response,
+and the automated exposure compute did not run (all population values
+are zero). Second, GDACS scrapes JTWC operationally and runs cumulative
+exposure on every advisory, so it captures the storm's full life cycle
+quantitatively.
+
+The PDC exposure schema is rich on paper. Where it does run (verified
+on the Puerto Rico flood `9175d060-4f6b-49f9-9335-950dfbcb0caa`,
+documented in `docs/pdc_api.md`) it provides per-country breakdowns
+with ISO3 codes, granular age bands, vulnerability classes, and
+capital exposure split by schools and hospitals. The shape joins
+cleanly to our existing GDACS schema on `(country, eventid)`. None of
+that helps for a cyclone where the values are all zero.
+
+## Structural limitations
+
+Three properties of the API would shape any pipeline built against it,
+independent of the Sinlaku-specific findings:
+
+1. **No archive.** `/hazards` returns currently-active hazards plus
+   those that ended within roughly the last 30 days. The `status`
+   query parameter is ignored, so there is no way to ask for older
+   events. A back-catalogue would have to be built locally by polling
+   daily and accumulating. That pattern matches the GDACS daily
+   monitor (`src/gdacs_monitor_email.py`), not the GDACS historical
+   exposure pipeline.
+2. **No incremental polling primitive.** Date filters are silently
+   ignored, so each poll fetches the full feed (a single ~340 KB JSON
+   document containing roughly 570 features at present). Deduplication
+   has to happen client-side using `(uuid, updatedAt)`.
+3. **No pagination.** If the rolling window grows substantially
+   (we observed this happening once: a cohort of 86 year-long flood
+   events all closed in a single 48-hour stretch), there is no
+   documented way to page through the response.
+
+Full evidence and the verified retention model are in
+`docs/pdc_api.md`.
+
+## Recommendation
+
+Don't integrate PDC into the cyclone exposure pipeline at this stage.
+For Sinlaku (the only cyclone we could observe), GDACS provides
+materially better information on every dimension we care about:
+real-time position updates, quantitative country-level exposure,
+per-advisory wind data, and a clean link back to the JTWC source. PDC
+adds nothing on top.
+
+The principal caveat is the sample size. Sinlaku is a single cyclone,
+hand-entered rather than ingested from an RSMC bulletin. We do not
+yet know whether a future PDC cyclone with an automated RSMC source
+would have populated exposure and refreshed positions. The conservative
+re-evaluation point is the next non-manual cyclone in the feed:
+re-run `artefacts/13_pdc_vs_gdacs/compare_sinlaku.py` (generalised to
+any UUID) on that storm before revisiting this recommendation.
+
+If at that point PDC does prove useful, the integration would still
+have to look like a daily-poll-and-accumulate against the rolling-window
+feed, with no historical backfill possible. The CERF analytical
+question (2006-present coverage) cannot be served from PDC under any
+plausible configuration of this API.
