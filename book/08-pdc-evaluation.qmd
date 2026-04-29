@@ -35,12 +35,61 @@ our evaluation:
   through the API.
 
 The OpenAPI specification at `/v3/api-docs` (auto-generated from the
-service's controllers, so authoritative) lists the entire endpoint
-surface as five operational paths: `/hazards`, `/hazards/{uuid}`,
-`/hazards/types`, plus `/actuator/info` and `/actuator/health`. There
-is no exposure subendpoint, no version history, no incidents endpoint.
-The detail object returned by `/hazards/{uuid}` is everything PDC
-exposes for a given hazard via this API.
+service's controllers, so authoritative for the path surface) lists
+the entire endpoint surface as five operational paths: `/hazards`,
+`/hazards/{uuid}`, `/hazards/types`, plus `/actuator/info` and
+`/actuator/health`. There is no exposure subendpoint, no version
+history, no incidents endpoint. The detail object returned by
+`/hazards/{uuid}` is everything PDC exposes for a given hazard via
+this API.
+
+The spec only formalizes the path surface, not response bodies: every
+operation declares `application/json: {}` with no schema attached, and
+`components.schemas` contains a single generic `Link` object. So the
+spec tells you what to call but not what each endpoint returns;
+response shapes had to be discovered live. The diagram below summarises
+what we actually probed, with the HTTP call on each arrow.
+
+```{mermaid}
+%%| label: fig-live-api
+%%| fig-cap: "Live API surface as observed on 2026-04-27. Solid green arrows are working endpoints with the response payload they returned. Dotted yellow arrows are query-parameter variations that the server accepted (HTTP 200) but silently ignored, returning the same payload as the unfiltered call. Dotted red arrows are paths we tried that the server does not route (HTTP 500 'No static resource')."
+flowchart LR
+    C(["client<br/>x-api-key: $PDC_API_KEY"])
+
+    C ==>|"GET /hazards?types=CYCLONE"| L["GeoJSON FeatureCollection<br/>1 active cyclone (Sinlaku)"]
+    C ==>|"GET /hazards/{uuid}"| D["Hazard detail JSON ~50 KB<br/>hazard, incident, exposure,<br/>impactGeometry, alertGeometry,<br/>features (1 Point + 1 Polygon),<br/>severity, category"]
+    C ==>|"GET /hazards/types"| T["array of {id, name}<br/>33 hazard types"]
+    C ==>|"GET /v3/api-docs"| O["OpenAPI 3.1.0 spec<br/>5 operational paths<br/>no response body schemas"]
+    C ==>|"GET /hazards (no params)"| ALL["GeoJSON FeatureCollection<br/>~570 features<br/>(active + recently-ended)"]
+
+    C -.->|"GET /hazards?status=ARCHIVED"| ALL
+    C -.->|"GET /hazards?status=ACTIVE"| ALL
+    C -.->|"GET /hazards?status=BOGUSVALUE"| ALL
+    C -.->|"GET /hazards?startedAfter=YYYY-MM-DD"| ALL
+    C -.->|"GET /hazards?updatedAfter=&lt;epoch&gt;"| ALL
+
+    C -.x|"GET /hazards/{uuid}/exposure"| X1["HTTP 500<br/>'No static resource'"]
+    C -.x|"GET /hazards/{uuid}/history"| X1
+    C -.x|"GET /incidents/{uuid}"| X1
+    C -.x|"GET /storage/{id}"| X1
+    C -.x|"GET /types  (PDF&apos;s wrong path)"| X1
+
+    classDef ok fill:#d9f5d9,stroke:#2a8a2a,color:#000
+    classDef ignored fill:#fff4e0,stroke:#d9a43a,color:#000
+    classDef bad fill:#f5d9d9,stroke:#a83232,color:#000
+
+    class L,D,T,O,ALL ok
+    class X1 bad
+```
+
+Three groups of arrows, three lessons. The solid arrows are the four
+endpoints that actually do something. The dotted yellow arrows show
+that `?status=`, `?startedAfter`, and `?updatedAfter` are silently
+ignored: the server accepts any value (even nonsense) and returns the
+same payload as the unfiltered call. The dotted red arrows are
+plausible-looking subendpoints that the server does not route at all
+(including the path the PDF says is `/types`, which actually lives at
+`/hazards/types`).
 
 ```{python}
 #| label: setup
