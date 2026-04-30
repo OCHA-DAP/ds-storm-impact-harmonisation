@@ -23,6 +23,7 @@ book:
         - 06-gdacs-episodes.qmd
         - 04-nhc-wsp-exploration.qmd
         - 05-gdacs-nhc-matching.qmd
+        - 08-pdc-evaluation.qmd
     - part: "Exposure Method Comparison"
       chapters:
         - 07-exposure-method-comparison.qmd
