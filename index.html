@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cyclone Exposure Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Source+Sans+Pro:wght@400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="assets/styles.css">
+
+</head>
+<body>
+    <div class="container">
+        <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:12px;">
+            <h1 style="margin-bottom:0;">Cyclone Exposure Dashboard</h1>
+            <span id="last-updated" style="font-size:12px; color:#888888;"></span>
+        </div>
+
+        <div id="summary-stats" class="summary-stats"></div>
+
+        <div class="main-content">
+            <div class="section left-section">
+                <div class="section-header">
+                    <h2>Historical Storms</h2>
+                </div>
+                <div id="storms-table-container" class="table-container">
+                    <div class="loading">Loading storm data...</div>
+                </div>
+            </div>
+
+            <div class="section right-section">
+                <div class="section-header">
+                    <h2>Country-Level Exposure: <span id="selected-storm-name">-</span></h2>
+                    <div class="source-legend">
+                        <div class="source-legend-item">
+                            <div class="legend-color adam"></div>
+                            <span>ADAM</span>
+                        </div>
+                        <div class="source-legend-item">
+                            <div class="legend-color gdacs"></div>
+                            <span>GDACS</span>
+                        </div>
+                        <div class="source-legend-item">
+                            <div class="legend-color chd"></div>
+                            <span>CHD</span>
+                        </div>
+                    </div>
+                </div>
+                <div id="country-table-container" class="table-container">
+                    <div class="empty-state">Select a storm to view country-level exposure estimates</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="country-modal" class="modal-overlay" style="display:none" onclick="closeModal(event)">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="modal-country-name"></h2>
+                <button class="modal-close" onclick="closeModal()">×</button>
+            </div>
+            <div id="modal-body"></div>
+        </div>
+    </div>
+
+    <div id="adm1-modal" class="modal-overlay" style="display:none" onclick="closeAdm1Modal(event)">
+        <div class="modal-content" style="max-width:780px; max-height:50vh; overflow-y:auto;">
+            <div class="modal-header">
+                <h2 id="adm1-modal-title"></h2>
+                <button class="modal-close" onclick="closeAdm1Modal()">×</button>
+            </div>
+            <div class="source-legend" style="padding:8px 0 12px 0;">
+                <div class="source-legend-item"><div class="legend-color adam"></div><span>ADAM</span></div>
+                <div class="source-legend-item"><div class="legend-color gdacs"></div><span>GDACS</span></div>
+            </div>
+            <div id="adm1-modal-body"></div>
+        </div>
+    </div>
+
+    <div id="dot-tooltip" class="dot-tooltip"></div>
+
+    <script>
+        let exposureData = [];
+        let adm1Data = [];
+        let stormDataCache = {};
+        let selectedStormSid = null;
+        let currentSortColumn = 'from_date';
+        let currentSortDirection = 'desc';
+
+        // Load data
+        fetch('assets/exposure_data.json')
+            .then(response => response.json())
+            .then(data => {
+                exposureData = data.data;
+                if (data.last_updated) {
+                    const d = new Date(data.last_updated);
+                    document.getElementById('last-updated').textContent =
+                        'Last updated: ' + d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+                }
+                renderStormsTable();
+            })
+            .catch(error => {
+                console.error('Error loading data:', error);
+                document.getElementById('storms-table-container').innerHTML =
+                    '<div class="empty-state">Error loading data. Please ensure assets/exposure_data.json is available.</div>';
+            });
+
+        fetch('assets/adm1_exposure_data.json')
+            .then(response => response.json())
+            .then(data => { adm1Data = data.data; })
+            .catch(() => { adm1Data = []; });
+
+        function sortStorms(column) {
+            if (currentSortColumn === column) {
+                currentSortDirection = currentSortDirection === 'asc' ? 'desc' : 'asc';
+            } else {
+                currentSortColumn = column;
+                currentSortDirection = 'asc';
+            }
+            renderStormsTable();
+        }
+
+        function renderStormsTable() {
+            // Group data by storm (sid)
+            const stormMap = {};
+            exposureData.forEach(row => {
+                if (!stormMap[row.sid]) {
+                    stormMap[row.sid] = {
+                        sid: row.sid,
+                        event_id: row.event_id,
+                        episode_id: row.episode_id,
+                        source: row.source,
+                        storm_name: row.storm_name,
+                        season: row.season,
+                        name: row.name,
+                        from_date: row.from_date,
+                        alert_level: row.alert_level,
+                        hasAdam: false,
+                        hasGdacs: false,
+                        hasChd: false,
+                        countries: []
+                    };
+                }
+
+                // Check if this row has ADAM, GDACS, or CHD data
+                const hasAdamData = row.pop_64kt_adam != null || row.pop_34kt_adam != null || row.pop_50kt_adam != null;
+                const hasGdacsData = row.pop_34kt_gdacs != null || row.pop_64kt_gdacs != null;
+                const hasChdData = row.pop_34kt_chd != null || row.pop_50kt_chd != null || row.pop_64kt_chd != null;
+
+                if (hasAdamData) stormMap[row.sid].hasAdam = true;
+                if (hasGdacsData) stormMap[row.sid].hasGdacs = true;
+                if (hasChdData) stormMap[row.sid].hasChd = true;
+            });
+
+            const storms = Object.values(stormMap);
+
+            // Summary stats
+            const totalStorms   = storms.length;
+            const withAdam      = storms.filter(s => s.hasAdam).length;
+            const withGdacs     = storms.filter(s => s.hasGdacs).length;
+            const withChd       = storms.filter(s => s.hasChd).length;
+            const withBoth      = storms.filter(s => s.hasAdam && s.hasGdacs && s.hasChd).length;
+            document.getElementById('summary-stats').innerHTML = `
+                <div class="stat-item"><span class="stat-value">${totalStorms}</span><span class="stat-label">Total storms</span></div>
+                <div class="stat-item"><span class="stat-value" style="color:#007CE0">${withAdam}</span><span class="stat-label">With ADAM data</span></div>
+                <div class="stat-item"><span class="stat-value" style="color:#1EBFB3">${withGdacs}</span><span class="stat-label">With GDACS data</span></div>
+                <div class="stat-item"><span class="stat-value" style="color:#E05C4B">${withChd}</span><span class="stat-label">With CHD data</span></div>
+                <div class="stat-item"><span class="stat-value">${withBoth}</span><span class="stat-label">With all sources</span></div>
+            `;
+
+            // Sort storms
+            storms.sort((a, b) => {
+                let aVal, bVal;
+
+                switch(currentSortColumn) {
+                    case 'storm_name':
+                        aVal = (a.name || '').toLowerCase();
+                        bVal = (b.name || '').toLowerCase();
+                        break;
+                    case 'sid':
+                        aVal = (a.sid || '').toLowerCase();
+                        bVal = (b.sid || '').toLowerCase();
+                        break;
+                    case 'event_id':
+                        aVal = a.event_id || 0;
+                        bVal = b.event_id || 0;
+                        break;
+                    case 'episode_id':
+                        aVal = a.episode_id || 0;
+                        bVal = b.episode_id || 0;
+                        break;
+                    case 'season':
+                        aVal = a.season || 0;
+                        bVal = b.season || 0;
+                        break;
+                    case 'from_date':
+                        aVal = a.from_date ? new Date(a.from_date).getTime() : 0;
+                        bVal = b.from_date ? new Date(b.from_date).getTime() : 0;
+                        break;
+                    case 'hasAdam':
+                        aVal = a.hasAdam ? 1 : 0;
+                        bVal = b.hasAdam ? 1 : 0;
+                        break;
+                    case 'hasGdacs':
+                        aVal = a.hasGdacs ? 1 : 0;
+                        bVal = b.hasGdacs ? 1 : 0;
+                        break;
+                    case 'hasChd':
+                        aVal = a.hasChd ? 1 : 0;
+                        bVal = b.hasChd ? 1 : 0;
+                        break;
+                    default:
+                        return 0;
+                }
+
+                if (typeof aVal === 'string') {
+                    return currentSortDirection === 'asc'
+                        ? aVal.localeCompare(bVal)
+                        : bVal.localeCompare(aVal);
+                } else {
+                    return currentSortDirection === 'asc'
+                        ? aVal - bVal
+                        : bVal - aVal;
+                }
+            });
+
+            const getSortClass = (column) => {
+                if (currentSortColumn === column) {
+                    return `sortable sorted-${currentSortDirection}`;
+                }
+                return 'sortable';
+            };
+
+            let html = `
+                <table class="storms-table">
+                    <thead>
+                        <tr>
+                            <th class="${getSortClass('storm_name')}" onclick="sortStorms('storm_name')">Storm Name</th>
+                            <th class="${getSortClass('sid')}" onclick="sortStorms('sid')">SID</th>
+                            <th class="${getSortClass('event_id')}" onclick="sortStorms('event_id')">GDACS ID</th>
+                            <th class="${getSortClass('episode_id')}" onclick="sortStorms('episode_id')">Episode ID</th>
+                            <th class="${getSortClass('season')}" onclick="sortStorms('season')">Season</th>
+                            <th class="${getSortClass('from_date')}" onclick="sortStorms('from_date')">Date</th>
+                            <th class="${getSortClass('hasAdam')}" onclick="sortStorms('hasAdam')" style="text-align: center;">ADAM</th>
+                            <th class="${getSortClass('hasGdacs')}" onclick="sortStorms('hasGdacs')" style="text-align: center;">GDACS</th>
+                            <th class="${getSortClass('hasChd')}" onclick="sortStorms('hasChd')" style="text-align: center;">CHD</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+
+            storms.forEach(storm => {
+                // Cache storm data for lookup
+                stormDataCache[storm.sid] = storm;
+
+                const date = storm.from_date ? new Date(storm.from_date).toLocaleDateString() : '-';
+
+                html += `
+                    <tr onclick="selectStorm('${storm.sid}')" data-sid="${storm.sid}">
+                        <td>${storm.name || '-'}</td>
+                        <td style="font-size: 12px; color: #888888;">${storm.sid || '-'}</td>
+                        <td style="font-size: 12px; color: #888888;">${storm.event_id || '-'}</td>
+                        <td style="font-size: 12px; color: #888888;">${storm.episode_id || '-'}</td>
+                        <td>${storm.season || '-'}</td>
+                        <td>${date}</td>
+                        <td style="text-align: center;"><span class="indicator ${storm.hasAdam ? 'adam-available' : 'unavailable'}"></span></td>
+                        <td style="text-align: center;"><span class="indicator ${storm.hasGdacs ? 'gdacs-available' : 'unavailable'}"></span></td>
+                        <td style="text-align: center;"><span class="indicator ${storm.hasChd ? 'chd-available' : 'unavailable'}"></span></td>
+                    </tr>
+                `;
+            });
+
+            html += `
+                    </tbody>
+                </table>
+            `;
+
+            document.getElementById('storms-table-container').innerHTML = html;
+        }
+
+        function selectStorm(sid) {
+            selectedStormSid = sid;
+
+            // Update selected row styling
+            document.querySelectorAll('.storms-table tbody tr').forEach(tr => {
+                tr.classList.remove('selected');
+            });
+            document.querySelector(`tr[data-sid="${sid}"]`).classList.add('selected');
+
+            // Get storm name from cache
+            const storm = stormDataCache[sid];
+            const stormName = storm ? (storm.name || 'Unknown') : 'Unknown';
+
+            // Update storm name in country section
+            document.getElementById('selected-storm-name').textContent = stormName;
+
+            // Render country table
+            renderCountryTable(sid);
+        }
+
+        function renderCountryTable(sid) {
+            const stormData = exposureData.filter(row => row.sid === sid);
+
+            if (stormData.length === 0) {
+                document.getElementById('country-table-container').innerHTML =
+                    '<div class="empty-state">No data available for this storm</div>';
+                return;
+            }
+
+            // Group by ISO3 to ensure one row per country
+            const countryMap = {};
+            stormData.forEach(row => {
+                if (!countryMap[row.iso3]) {
+                    countryMap[row.iso3] = {
+                        country_name: row.country_name,
+                        iso3: row.iso3,
+                        pop_64kt_adam: row.pop_64kt_adam,
+                        pop_50kt_adam: row.pop_50kt_adam,
+                        pop_34kt_adam: row.pop_34kt_adam,
+                        pop_64kt_gdacs: row.pop_64kt_gdacs,
+                        pop_34kt_gdacs: row.pop_34kt_gdacs,
+                        pop_64kt_chd: row.pop_64kt_chd,
+                        pop_50kt_chd: row.pop_50kt_chd,
+                        pop_34kt_chd: row.pop_34kt_chd
+                    };
+                } else {
+                    // Merge data if we have multiple rows for the same country
+                    if (row.country_name != null) countryMap[row.iso3].country_name = row.country_name;
+                    if (row.pop_64kt_adam != null) countryMap[row.iso3].pop_64kt_adam = row.pop_64kt_adam;
+                    if (row.pop_50kt_adam != null) countryMap[row.iso3].pop_50kt_adam = row.pop_50kt_adam;
+                    if (row.pop_34kt_adam != null) countryMap[row.iso3].pop_34kt_adam = row.pop_34kt_adam;
+                    if (row.pop_64kt_gdacs != null) countryMap[row.iso3].pop_64kt_gdacs = row.pop_64kt_gdacs;
+                    if (row.pop_34kt_gdacs != null) countryMap[row.iso3].pop_34kt_gdacs = row.pop_34kt_gdacs;
+                    if (row.pop_64kt_chd != null) countryMap[row.iso3].pop_64kt_chd = row.pop_64kt_chd;
+                    if (row.pop_50kt_chd != null) countryMap[row.iso3].pop_50kt_chd = row.pop_50kt_chd;
+                    if (row.pop_34kt_chd != null) countryMap[row.iso3].pop_34kt_chd = row.pop_34kt_chd;
+                }
+            });
+
+            const countries = Object.values(countryMap).sort((a, b) =>
+                (a.country_name || '').localeCompare(b.country_name || '')
+            );
+
+            const formatNumber = (val) => {
+                if (val == null || val === '') return '-';
+                return Math.round(val).toLocaleString();
+            };
+
+            const createStackedValues = (adamVal, gdacsVal, chdVal) => {
+                const adamDisplay = adamVal != null ? formatNumber(adamVal) : '-';
+                const gdacsDisplay = gdacsVal != null ? formatNumber(gdacsVal) : '-';
+                const chdDisplay = chdVal != null ? formatNumber(chdVal) : '-';
+
+                const adamClass = adamVal != null ? 'adam-value' : 'no-data';
+                const gdacsClass = gdacsVal != null ? 'gdacs-value' : 'no-data';
+                const chdClass = chdVal != null ? 'chd-value' : 'no-data';
+
+                return `
+                    <div class="stacked-values">
+                        <div class="${adamClass}">${adamDisplay}</div>
+                        <div class="${gdacsClass}">${gdacsDisplay}</div>
+                        <div class="${chdClass}">${chdDisplay}</div>
+                    </div>
+                `;
+            };
+
+            let html = `
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Country</th>
+                            <th style="text-align: center;">High Wind (64 kt)</th>
+                            <th style="text-align: center;">Medium Wind (50 kt)</th>
+                            <th style="text-align: center;">Low Wind (34 kt)</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+
+            countries.forEach(country => {
+                const safeIso3 = (country.iso3 || '').replace(/'/g, "\\'");
+                const safeName = (country.country_name || '-').replace(/'/g, "\\'");
+                const hasAdm1 = adm1Data.some(
+                    r => r.sid === sid && r.iso3 === country.iso3
+                );
+                const adm1Link = hasAdm1
+                    ? `<span class="country-link" onclick="openAdm1Modal('${sid}', '${safeIso3}', '${safeName}')">See admin 1</span>`
+                    : '-';
+                html += `
+                    <tr>
+                        <td><span class="country-link" onclick="openCountryModal('${safeIso3}', '${safeName}')">${country.country_name || '-'}</span></td>
+                        <td class="comparison-cell">${createStackedValues(country.pop_64kt_adam, country.pop_64kt_gdacs, country.pop_64kt_chd)}</td>
+                        <td class="comparison-cell">${createStackedValues(country.pop_50kt_adam, null, country.pop_50kt_chd)}</td>
+                        <td class="comparison-cell">${createStackedValues(country.pop_34kt_adam, country.pop_34kt_gdacs, country.pop_34kt_chd)}</td>
+                        <td style="white-space:nowrap;">${adm1Link}</td>
+                    </tr>
+                `;
+            });
+
+            html += `
+                    </tbody>
+                </table>
+            `;
+
+            document.getElementById('country-table-container').innerHTML = html;
+        }
+
+        const WIND_LEVELS = [
+            { value: '34', label: '34 kt', adamKey: 'pop_34kt_adam', gdacsKey: 'pop_34kt_gdacs', chdKey: 'pop_34kt_chd' },
+            { value: '50', label: '50 kt', adamKey: 'pop_50kt_adam', gdacsKey: null,              chdKey: 'pop_50kt_chd' },
+            { value: '64', label: '64 kt', adamKey: 'pop_64kt_adam', gdacsKey: 'pop_64kt_gdacs', chdKey: 'pop_64kt_chd' },
+        ];
+
+        let _modalCountryData = [];
+        let _modalHighlightSid = null;
+
+        function openCountryModal(iso3, countryName) {
+            _modalCountryData = exposureData.filter(row => row.iso3 === iso3);
+            _modalHighlightSid = selectedStormSid;
+            document.getElementById('modal-country-name').textContent = countryName;
+            const toggle = WIND_LEVELS.map((w, i) =>
+                `<label class="wind-option"><input type="radio" name="wind-speed" value="${w.value}" ${i === 0 ? 'checked' : ''} onchange="updateChart('${w.value}')">${w.label}</label>`
+            ).join('');
+            document.getElementById('modal-body').innerHTML =
+                `<div class="wind-toggle">${toggle}</div><div id="chart-svg-container">${buildStripChart('34')}</div>`;
+            setupDotTooltips();
+            document.getElementById('country-modal').style.display = 'flex';
+        }
+
+        function updateChart(windValue) {
+            document.getElementById('chart-svg-container').innerHTML = buildStripChart(windValue);
+            setupDotTooltips();
+        }
+
+        function buildStripChart(windValue) {
+            const level = WIND_LEVELS.find(w => w.value === windValue);
+
+            const W = 500, H = 360;
+            const m = { top: 20, right: 30, bottom: 56, left: 72 };
+            const pw = W - m.left - m.right;
+            const ph = H - m.top - m.bottom;
+
+            // Three strip centers
+            const adamX  = pw * 0.2;
+            const gdacsX = pw * 0.5;
+            const chdX   = pw * 0.8;
+            const jitterRange = pw * 0.14;
+
+            // Scale across all strips for the selected wind level
+            let maxVal = 0;
+            _modalCountryData.forEach(row => {
+                const av = row[level.adamKey];
+                const gv = level.gdacsKey ? row[level.gdacsKey] : null;
+                const cv = level.chdKey ? row[level.chdKey] : null;
+                if (av != null && av > maxVal) maxVal = av;
+                if (gv != null && gv > maxVal) maxVal = gv;
+                if (cv != null && cv > maxVal) maxVal = cv;
+            });
+            if (maxVal === 0) maxVal = 1;
+
+            const yPos = v => ph - (v / maxVal) * ph;
+
+            function jitter(s) {
+                let h = 5381;
+                for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) & 0x7FFFFFFF;
+                return ((h % 10000) / 10000 - 0.5) * jitterRange;
+            }
+
+            // Y-axis grid lines and labels — 5 evenly spaced ticks
+            let grid = '', yLabels = '';
+            const nTicks = 5;
+            for (let i = 0; i <= nTicks; i++) {
+                const v = (i / nTicks) * maxVal;
+                const y = yPos(v).toFixed(1);
+                const label = v >= 1e6 ? (v / 1e6).toFixed(1) + 'M' : v >= 1e3 ? (v / 1e3).toFixed(0) + 'K' : Math.round(v).toString();
+                grid    += `<line x1="0" y1="${y}" x2="${pw}" y2="${y}" stroke="#EEEEEE" stroke-width="1"/>`;
+                yLabels += `<text x="-8" y="${(parseFloat(y) + 4).toFixed(1)}" text-anchor="end" font-size="11" fill="#999">${label}</text>`;
+            }
+
+            // Dots — normal first, selected on top
+            let normalDots = '', selectedDots = '';
+            function addDot(stripX, v, name, season, color, sid) {
+                if (v == null) return;
+                const isHL = _modalHighlightSid != null && sid === _modalHighlightSid;
+                const y = yPos(v).toFixed(1);
+                const j = jitter(name + stripX.toFixed(0));
+                const valLabel = v >= 1e6 ? (v / 1e6).toFixed(2) + 'M' : v >= 1e3 ? (v / 1e3).toFixed(1) + 'K' : v.toLocaleString();
+                const dot = `<circle cx="${(stripX + j).toFixed(1)}" cy="${y}" r="${isHL ? 8 : 5}" fill="${isHL ? '#E05C4B' : color}" opacity="${isHL ? 1 : 0.7}" stroke="${isHL ? '#B84535' : 'white'}" stroke-width="${isHL ? 2 : 1}" class="dot" data-storm="${name.replace(/"/g, '&quot;')}" data-season="${season}" data-val="${valLabel}"/>`;
+                if (isHL) selectedDots += dot;
+                else normalDots += dot;
+            }
+
+            let selectedName = '';
+            _modalCountryData.forEach(row => {
+                if (_modalHighlightSid != null && row.sid === _modalHighlightSid) selectedName = row.name;
+                addDot(adamX,  row[level.adamKey],                            row.name, row.season, '#007CE0', row.sid);
+                addDot(gdacsX, level.gdacsKey ? row[level.gdacsKey] : null,  row.name, row.season, '#1EBFB3', row.sid);
+                addDot(chdX,   level.chdKey  ? row[level.chdKey]   : null,  row.name, row.season, '#E05C4B', row.sid);
+            });
+
+            // X-axis labels
+            const gdacsColor = level.gdacsKey ? '#1EBFB3' : '#CCCCCC';
+            const xLabels = `
+                <text x="${adamX.toFixed(1)}"  y="${ph + 22}" text-anchor="middle" font-size="13" font-weight="600" fill="#007CE0">ADAM</text>
+                <text x="${gdacsX.toFixed(1)}" y="${ph + 22}" text-anchor="middle" font-size="13" font-weight="600" fill="${gdacsColor}">GDACS</text>
+                <text x="${chdX.toFixed(1)}"   y="${ph + 22}" text-anchor="middle" font-size="13" font-weight="600" fill="#E05C4B">CHD</text>
+            `;
+
+            let noEquivLabel = '';
+            if (!level.gdacsKey) {
+                noEquivLabel += `<text x="${gdacsX.toFixed(1)}" y="${(ph / 2).toFixed(0)}" text-anchor="middle" font-size="12" fill="#CCCCCC">No equivalent</text>`;
+            }
+
+            // Legend (selected storm only — ADAM/GDACS identified by x-axis labels)
+            const legendLabel = selectedName ? selectedName : 'Selected storm';
+            const legend = `
+                <circle cx="${(pw / 2 - 58).toFixed(0)}" cy="${ph + 42}" r="6" fill="#E05C4B" stroke="#B84535" stroke-width="2"/>
+                <text    x="${(pw / 2 - 46).toFixed(0)}" y="${ph + 46}" font-size="11" fill="#555">${legendLabel}</text>
+            `;
+
+            return `<svg width="${W}" height="${H}">
+                <g transform="translate(${m.left},${m.top})">
+                    ${grid}
+                    <line x1="0" y1="0" x2="0" y2="${ph}" stroke="#DDDDDD" stroke-width="1"/>
+                    <line x1="0" y1="${ph}" x2="${pw}" y2="${ph}" stroke="#DDDDDD" stroke-width="1"/>
+                    ${normalDots}
+                    ${selectedDots}
+                    ${noEquivLabel}
+                    ${xLabels}
+                    ${yLabels}
+                    ${legend}
+                    <text transform="rotate(-90)" x="${(-ph / 2).toFixed(0)}" y="-56" text-anchor="middle" font-size="12" fill="#999">Population exposed</text>
+                </g>
+            </svg>`;
+        }
+
+        function setupDotTooltips() {
+            const tooltip = document.getElementById('dot-tooltip');
+            document.querySelectorAll('#modal-body .dot').forEach(dot => {
+                dot.addEventListener('mouseenter', e => {
+                    tooltip.innerHTML = `<strong>${e.target.dataset.storm}</strong> (${e.target.dataset.season})<br>${e.target.dataset.val}`;
+                    tooltip.style.display = 'block';
+                });
+                dot.addEventListener('mousemove', e => {
+                    tooltip.style.left = (e.clientX + 14) + 'px';
+                    tooltip.style.top  = (e.clientY - 48) + 'px';
+                });
+                dot.addEventListener('mouseleave', () => {
+                    tooltip.style.display = 'none';
+                });
+            });
+        }
+
+        function closeModal(e) {
+            if (!e || e.target === document.getElementById('country-modal')) {
+                document.getElementById('country-modal').style.display = 'none';
+                document.getElementById('dot-tooltip').style.display = 'none';
+            }
+        }
+
+        function openAdm1Modal(sid, iso3, countryName) {
+            document.getElementById('adm1-modal-title').textContent =
+                `Admin 1 Exposure — ${countryName}`;
+            document.getElementById('adm1-modal-body').innerHTML =
+                renderAdm1Table(sid, iso3);
+            document.getElementById('adm1-modal').style.display = 'flex';
+        }
+
+        function renderAdm1Table(sid, iso3) {
+            const rows = adm1Data.filter(r => r.sid === sid && r.iso3 === iso3);
+            if (rows.length === 0) return '<div class="empty-state">No admin 1 data available.</div>';
+
+            const formatNumber = (val) => {
+                if (val == null || val === '') return '-';
+                return Math.round(val).toLocaleString();
+            };
+
+            const createStackedValues = (adamVal, gdacsVal) => {
+                const adamDisplay = adamVal != null ? formatNumber(adamVal) : '-';
+                const gdacsDisplay = gdacsVal != null ? formatNumber(gdacsVal) : '-';
+                return `
+                    <div class="stacked-values">
+                        <div class="${adamVal != null ? 'adam-value' : 'no-data'}">${adamDisplay}</div>
+                        <div class="${gdacsVal != null ? 'gdacs-value' : 'no-data'}">${gdacsDisplay}</div>
+                    </div>
+                `;
+            };
+
+            // Sort by adm1_name
+            const sorted = [...rows].sort((a, b) =>
+                (a.adm1_name || '').localeCompare(b.adm1_name || '')
+            );
+
+            let html = `
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Admin 1</th>
+                            <th style="text-align:center;">High Wind (64 kt)</th>
+                            <th style="text-align:center;">Medium Wind (50 kt)</th>
+                            <th style="text-align:center;">Low Wind (34 kt)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+            const totals = { pop_64kt_adam: null, pop_64kt_gdacs: null, pop_50kt_adam: null, pop_34kt_adam: null, pop_34kt_gdacs: null };
+            sorted.forEach(row => {
+                for (const key of Object.keys(totals)) {
+                    if (row[key] != null) totals[key] = (totals[key] || 0) + row[key];
+                }
+                html += `
+                    <tr>
+                        <td>${row.adm1_name || '-'}</td>
+                        <td class="comparison-cell">${createStackedValues(row.pop_64kt_adam, row.pop_64kt_gdacs)}</td>
+                        <td class="comparison-cell">${createStackedValues(row.pop_50kt_adam, null)}</td>
+                        <td class="comparison-cell">${createStackedValues(row.pop_34kt_adam, row.pop_34kt_gdacs)}</td>
+                    </tr>
+                `;
+            });
+            html += `
+                    </tbody>
+                    <tfoot>
+                        <tr style="font-weight:600; border-top: 2px solid #007CE0;">
+                            <td>Total</td>
+                            <td class="comparison-cell">${createStackedValues(totals.pop_64kt_adam, totals.pop_64kt_gdacs)}</td>
+                            <td class="comparison-cell">${createStackedValues(totals.pop_50kt_adam, null)}</td>
+                            <td class="comparison-cell">${createStackedValues(totals.pop_34kt_adam, totals.pop_34kt_gdacs)}</td>
+                        </tr>
+                    </tfoot>
+                </table>`;
+            return html;
+        }
+
+        function closeAdm1Modal(e) {
+            if (!e || e.target === document.getElementById('adm1-modal')) {
+                document.getElementById('adm1-modal').style.display = 'none';
+            }
+        }
+    </script>
+</body>
+</html>

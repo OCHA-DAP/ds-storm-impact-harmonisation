@@ -1,0 +1,42 @@
+[project]
+name = "ds-storm-impact-harmonisation"
+version = "0.1.0"
+requires-python = "==3.10.*"
+description = "Pipeline for harmonising storm impact data from ADAM and GDACS"
+authors = [{name = "Hannah", email = "hannah.ker@un.org"}]
+dependencies = [
+    "requests>=2.31.0",
+    "pandas>=2.1.0",
+    "pycountry>=23.12.11",
+    "ocha-stratus==0.1.6",
+    "python-dotenv",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.1.0",
+    "pre-commit",
+    "jupyter",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+]
+ignore = []
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
