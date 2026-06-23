@@ -304,13 +304,21 @@ def lookup_adm1_coverage(engine):
 
 
 def storms_with_source_exposure(engine, atcf_ids: list[str]):
-    """(chd_set, gdacs_set, adam_set): atcf_ids for which each source has
-    ANY exposure (either admin level). This is "the source REPORTED the
-    storm" — the criterion for the zero-vs-blank fill: a source that
-    reported a storm gets 0 for that storm's units it didn't list; a source
-    that never reported the storm at all is left blank. (Distinct from
-    merely being LINKED in storm_id_lookup — a linked event whose CSV 403'd
-    has no exposure, so it must stay blank.)"""
+    """(chd_set, gdacs_set, adam_set): atcf_ids for which each source actually
+    COMPUTED exposure — i.e. has at least one POSITIVE pop_exposed value. This
+    is the criterion for the zero-vs-blank fill: a source that computed a storm
+    gets 0 for the units it didn't list (not in its footprint); a source that
+    never computed the storm is left blank.
+
+    CAVEAT — why `pop_exposed > 0`, not merely "has a row": GDACS lists the
+    countries its wind footprint geometrically intersected, but for storms in
+    its ~2016–2022 pre-compute era it returns POP_AFFECTED = -1 ("not computed")
+    for ALL of them, which lands in the DB as NULL pop_exposed. Counting those
+    as "reported" then zero-fills 116 storms' worth of MISSING values into fake
+    zeros (see source_diagnostics `values_missing`). A row with NULL pop_exposed
+    is a data gap, NOT a true 0, so it must not make a storm "reported". A storm
+    GDACS genuinely found no exposure for instead produces NO impact rows
+    (`NO_ROWS`/empty getimpact) and is handled via the diagnostic, not here."""
     if not atcf_ids:
         return set(), set(), set()
     p = {"atcf_ids": atcf_ids}
@@ -323,11 +331,11 @@ def storms_with_source_exposure(engine, atcf_ids: list[str]):
     gd = pd.read_sql(_expand(
         "SELECT DISTINCT l.atcf_id FROM storms.gdacs_exposure g "
         "JOIN storms.storm_id_lookup l ON l.gdacs_eventid = g.gdacs_eventid "
-        "WHERE l.atcf_id IN :atcf_ids"), engine, params=p)
+        "WHERE l.atcf_id IN :atcf_ids AND g.pop_exposed > 0"), engine, params=p)
     ad = pd.read_sql(_expand(
         "SELECT DISTINCT l.atcf_id FROM storms.adam_exposure a "
         "JOIN storms.storm_id_lookup l ON l.adam_eventid = a.adam_eventid "
-        "WHERE l.atcf_id IN :atcf_ids"), engine, params=p)
+        "WHERE l.atcf_id IN :atcf_ids AND a.pop_exposed > 0"), engine, params=p)
     return (set(obsv["atcf_id"]) | set(fcst["atcf_id"]),
             set(gd["atcf_id"]), set(ad["atcf_id"]))
 

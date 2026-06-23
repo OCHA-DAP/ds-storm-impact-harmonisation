@@ -81,6 +81,7 @@ BLOB_NAME = ("ds-storm-impact-harmonisation/processed/"
 GDACS_STATUS_LABEL = {
     "have_exposure": "",
     "reported_zero": "reported zero exposure",
+    "values_missing": "exposure not computed by GDACS (POP_AFFECTED=-1)",
     "recoverable_latest": "not yet ingested (GDACS serves it now)",
     "partial_no_final": "final footprint unavailable (GDACS server error, 500)",
     "unservable": "exposure unavailable (GDACS server error, 500)",
@@ -88,6 +89,7 @@ GDACS_STATUS_LABEL = {
 }
 ADAM_STATUS_LABEL = {
     "have_exposure": "",
+    "values_missing": "exposure not computed (pop_exposed all NULL)",
     "recoverable_latest": "not yet ingested (CSV available)",
     "served_zero": "reported zero exposure",
     "csv_403": "exposure access denied (403)",
@@ -98,8 +100,8 @@ ADAM_STATUS_LABEL = {
 # When a storm bridges to more than one event of a source, keep the most
 # exposure-bearing status (earlier = better).
 _STATUS_PRIORITY = ["have_exposure", "reported_zero", "recoverable_latest",
-                    "partial_no_final", "served_zero", "unservable",
-                    "csv_403", "csv_error", "no_data"]
+                    "partial_no_final", "served_zero", "values_missing",
+                    "unservable", "csv_403", "csv_error", "no_data"]
 
 
 def load_status(path: Path = OUT) -> pd.DataFrame:
@@ -163,12 +165,19 @@ def _clean_name(s: str) -> str:
 def _db_facts(engine):
     """Returns a dict of DB-derived facts used to classify without probing."""
     with engine.connect() as c:
+        # has_pos distinguishes a real footprint (>=1 positive pop_exposed)
+        # from rows that exist but are ALL NULL — GDACS listed the countries
+        # its footprint intersected but returned POP_AFFECTED = -1 ("not
+        # computed", its ~2016-2022 pre-compute era). Those are a data gap
+        # (`values_missing`), NOT exposure and NOT a true zero.
         gd = pd.read_sql(text(
             "SELECT gdacs_eventid AS eid, COUNT(*) AS rows, "
+            "COALESCE(BOOL_OR(pop_exposed > 0), FALSE) AS has_pos, "
             "SUM(CASE WHEN admin_level=0 THEN pop_exposed ELSE 0 END) AS pop0 "
             "FROM storms.gdacs_exposure GROUP BY gdacs_eventid"), c)
         ad = pd.read_sql(text(
             "SELECT adam_eventid AS eid, COUNT(*) AS rows, "
+            "COALESCE(BOOL_OR(pop_exposed > 0), FALSE) AS has_pos, "
             "SUM(CASE WHEN admin_level=0 THEN pop_exposed ELSE 0 END) AS pop0 "
             "FROM storms.adam_exposure GROUP BY adam_eventid"), c)
         lk = pd.read_sql(text(
@@ -270,12 +279,23 @@ def build_gdacs_diag(engine, facts, bridge, from_date="2010-01-01"):
                     matched=eid in linked,
                     match_method=("lookup" if eid in linked
                                   else ("name_year" if atcf else None)))
-        if eid in have.index:
+        if eid in have.index and bool(have.loc[eid, "has_pos"]):
             rows.append({**base, "status": "have_exposure",
                          "final_exposure_available": True,
                          "exposure_rows": int(have.loc[eid, "rows"]),
                          "total_pop_adm0": int(have.loc[eid, "pop0"]),
                          "detail": "in gdacs_exposure"})
+        elif eid in have.index:
+            # rows exist but NO positive value ⟹ POP_AFFECTED all -1/NULL:
+            # GDACS intersected countries but never computed exposure. A data
+            # gap, NOT a true zero (the storm DID hit land — see e.g. FIONA,
+            # MATTHEW). Distinct from reported_zero (no rows = genuine empty).
+            rows.append({**base, "status": "values_missing",
+                         "final_exposure_available": False,
+                         "exposure_rows": int(have.loc[eid, "rows"]),
+                         "total_pop_adm0": 0,
+                         "detail": "rows present but pop_exposed all NULL "
+                                   "(GDACS POP_AFFECTED=-1, not computed)"})
         elif eid in linked:
             # linked but no exposure ⟹ fetch succeeded empty ⟹ zero
             rows.append({**base, "status": "reported_zero",
@@ -303,12 +323,19 @@ def build_adam_diag(engine, facts, bridge, from_date="2010-01-01"):
                     match_method=("lookup" if eid in linked
                                   else ("name_year" if atcf else None)),
                     csv_url=r.get("population_csv_url"))
-        if eid in have.index:
+        if eid in have.index and bool(have.loc[eid, "has_pos"]):
             rows.append({**base, "status": "have_exposure",
                          "final_exposure_available": True,
                          "exposure_rows": int(have.loc[eid, "rows"]),
                          "total_pop_adm0": int(have.loc[eid, "pop0"]),
                          "detail": "in adam_exposure"})
+        elif eid in have.index:
+            # rows present but no positive value — exposure not computed.
+            rows.append({**base, "status": "values_missing",
+                         "final_exposure_available": False,
+                         "exposure_rows": int(have.loc[eid, "rows"]),
+                         "total_pop_adm0": 0,
+                         "detail": "rows present but pop_exposed all NULL"})
         else:
             gaps.append((eid, base))
     return rows, gaps
