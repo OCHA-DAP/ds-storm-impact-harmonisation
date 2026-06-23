@@ -17,6 +17,8 @@ book:
       chapters:
         - 02b-analysis-cerf-api.qmd
         - 02c-analysis-inform.qmd
+        - 02d-analysis-conflict.qmd
+        - 02e-country-differentiation.qmd
     - part: "Monitoring Pipeline Exploration"
       chapters:
         - 03-gdacs-realtime.qmd
@@ -26,6 +28,7 @@ book:
         - 08-pdc-evaluation.qmd
     - part: "Exposure Method Comparison"
       chapters:
+        - 09-source-comparison.qmd
         - 07-exposure-method-comparison.qmd
     - part: "Appendices"
       chapters:

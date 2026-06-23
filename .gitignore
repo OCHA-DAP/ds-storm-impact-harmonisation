@@ -3,6 +3,7 @@
 book/_output/
 book/_freeze/
 book/_cache/
+book/*_files/
 data/
 __pycache__/
 app/__marimo__/

@@ -39,16 +39,23 @@ All in Azure Blob Storage (`projects` container, `dev` stage):
 
 ## Book Chapter Caches
 
-Book chapters that fetch from external APIs cache responses locally to avoid re-fetching on every render. Caches live in `book/_cache/<chapter>/` and are populated by scripts in `scripts/`.
+Book chapters that fetch from external APIs cache responses to avoid re-fetching on every render. Chapters load from cache by default; live API call code is kept in `eval: false` cells for reference.
+
+**Local caches** (event-specific, committed to git): live in `book/_cache/<chapter>/` and are populated by `scripts/cache_*.py` scripts.
 
 | Chapter | Cache script | Cache dir |
 |---|---|---|
 | `06-gdacs-episodes.qmd` | `scripts/cache_gdacs_episodes.py` | `book/_cache/06-gdacs-episodes/` |
 | `08-pdc-evaluation.qmd` | `scripts/cache_pdc_sinlaku.py` | `book/_cache/08-pdc-evaluation/` |
 
-To refresh a cache: `uv run python scripts/<cache-script>.py`
+**Blob caches** (full-dataset, stored in Azure): populated by `scripts/refresh_*.py` scripts and read via `stratus.load_parquet_from_blob()`.
 
-The `.qmd` files load from cache by default. Live API call code is kept in `eval: false` cells for reference.
+| Chapter / section | Refresh script | Blob path |
+|---|---|---|
+| `03-gdacs-realtime.qmd` § API Update Latency | `scripts/cache_adam_latency.py` | `ds-storm-impact-harmonisation/processed/adam_episode_latency.parquet` |
+| `03-gdacs-realtime.qmd` § API Update Latency | `scripts/cache_gdacs_latency.py` | `ds-storm-impact-harmonisation/processed/gdacs_gts_latency.parquet` |
+
+To refresh: `uv run python scripts/<script>.py`
 
 ## ocha_stratus — Azure Blob & Database Access
 
