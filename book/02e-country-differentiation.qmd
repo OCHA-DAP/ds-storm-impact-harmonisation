@@ -1,0 +1,613 @@
+---
+title: "Country Differentiation in the 3RM — a Deep Dive"
+jupyter: ds-storm-impact
+---
+
+::: {.callout-note appearance="simple"}
+## Summary
+
+The 3RM (and its conflict variant) is **pooled across countries**: it allows a
+different baseline per *emergency type* but never per *country*. This chapter
+asks whether adding a country-level differentiator improves the model, testing
+every form — a country **random intercept**, an external **country-baseline
+covariate**, and country **random slopes** — across the full 3RM (n≈422), the
+tropical-cyclone subset (n≈47) and the conflict subset (n≈97).
+
+**Verdict, two tiers:**
+
+- **Dead everywhere:** country *random intercepts* (the residual between-country
+  variance is ~0 — ICC 0.044 full, 0.0003 conflict; the funding ask already
+  encodes the country tier), the *random slope on the funding ask*, and 02b's
+  appendix "average annual RR" feature, which is **data leakage** (it collapses
+  to ~0 out-of-sample once the storm outcome is removed from its own predictor).
+- **One open question:** a country **random slope on ACLED** in the *conflict*
+  model is a real, parsimonious, in-sample-significant effect (slope-only AIC
+  −4.5 vs pooled, LRT p=0.011, +0.05 conditional R²) — but its *predictive*
+  payoff is unconfirmed at n≈97 (out-of-sample right-direction only, p=0.34).
+  We leave deployment open; see
+  `docs/decisions/0001-country-differentiation-in-the-3rm.md`.
+
+A methodological thread runs throughout: at these sample sizes, **in-sample
+inference (AIC/LRT) and out-of-sample CV answer different questions and must
+both be reported** — and **leakage is a property of how a feature is built, not
+something cross-validation reliably catches.**
+:::
+
+## Why this chapter exists
+
+Chapters `02b`–`02d` build the 3RM as a pooled OLS: emergency-type dummies, a
+vulnerability term (`inform_composite`), `LogRequired`, `LogTargeted`, and — for
+conflict — ACLED fatalities and IDMC displacement. Two observations hinted that
+a **country-level differentiator** might help:
+
+1. `02b`'s appendix found a country "average annual RR spending" feature that
+   looked like a strong predictor of storm allocations.
+2. `02d` found country-conditional ACLED slopes ranging from −0.46 to +0.71 —
+   the violence→allocation relationship looks very different across regimes.
+
+Neither was tested honestly out-of-sample. This chapter does that, and along the
+way pins down three methodological points that matter at small *n*:
+
+- **Which CV for which question.** *Leave-one-country-out (LOCO)* tests
+  generalisation to **unseen** countries and structurally cannot credit a
+  country effect. *Forward-chaining temporal* CV (train past → predict next
+  year) tests the realistic "**known country, next event**" use case. We
+  standardise on the latter; `02d`'s LOCO was the wrong test for crediting
+  country structure.
+- **Leakage ≠ overfitting.** Overfitting is fitting noise (cured by penalisation
+  / CV). Leakage is the predictor *containing the outcome* (cured only by
+  rebuilding the feature). Crucially, **CV does not reliably catch leakage** — a
+  leaky feature can post a healthy CV score. We show this directly.
+- **In-sample and out-of-sample both matter.** The production model was selected
+  on in-sample fit; judging a challenger only by (noisy, underpowered) CV is an
+  inconsistent bar. We report AIC/LRT *and* CV, and let the disagreements be
+  informative.
+
+```{python}
+#| label: setup
+#| output: false
+import pathlib
+import sys
+import warnings
+
+# Cells render with the chapter dir (book/) as cwd; put the repo root — which
+# holds src/ and .env — on the path so the loaders resolve as in 02b–02d.
+_root = pathlib.Path.cwd()
+if not (_root / "src").is_dir() and (_root.parent / "src").is_dir():
+    _root = _root.parent
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+
+import numpy as np
+import pandas as pd
+import statsmodels.api as sm
+from dotenv import load_dotenv
+from great_tables import GT
+from plotnine import (
+    aes, geom_point, geom_segment, geom_vline, ggplot, labs, theme_minimal,
+)
+from scipy.stats import chi2, wilcoxon
+
+import ocha_stratus as stratus
+from src.datasets.cerf import build_analysis_dataset_api, load_cerf_api_data
+from src.datasets.conflict import load_conflict_training_frame
+from src.datasets.inform import build_training_frame
+from src.models import cerf_conflict, cerf_inform
+
+load_dotenv(_root / ".env")
+warnings.filterwarnings("ignore")
+np.random.seed(7)
+TGT = "LogApproved"
+OPT = (["lbfgs"], ["cg"], ["bfgs"])
+
+
+# ── Shared modelling helpers (distilled from analysis artefacts 16–19) ──
+
+def design(d, regs):
+    X = d[regs].astype(float).copy()
+    X.insert(0, "const", 1.0)
+    return X
+
+
+def center(d, cols, mu=None):
+    """Center continuous predictors — pure reparameterisation, but it fixes
+    the MixedLM optimiser conditioning (LogRequired etc. are logs of USD)."""
+    out = d.copy()
+    mu = d[cols].mean() if mu is None else mu
+    for c in cols:
+        out[c] = d[c] - mu[c]
+    return out, mu
+
+
+def re_design(d, slope_var=None, intercept_re=True):
+    cols = []
+    if intercept_re:
+        cols.append(np.ones(len(d)))
+    if slope_var is not None:
+        cols.append(d[slope_var].astype(float).to_numpy())
+    return np.column_stack(cols)
+
+
+def fit_mixed(d, fixed, group, slope_var=None, intercept_re=True, reml=True):
+    """Mixed fit; random intercept and/or slope on slope_var. Tries optimisers
+    in order, returns (result, converged).
+
+    reml=True (default) for describing variance components / ICC and for
+    prediction; reml=False (ML) only when comparing against pooled OLS via
+    AIC/LRT, which needs a common likelihood basis.
+    """
+    y = d[TGT].astype(float)
+    X = sm.add_constant(d[fixed].astype(float), has_constant="add")
+    exog_re = re_design(d, slope_var, intercept_re)
+    last = None
+    for meth in OPT:
+        md = sm.MixedLM(y, X, groups=d[group].to_numpy(), exog_re=exog_re)
+        last = md.fit(method=meth, reml=reml)
+        if last.converged:
+            return last, True
+    return last, False
+
+
+def pseudo_r2(m, X, Z):
+    """Nakagawa & Schielzeth marginal / conditional R² (in-sample, optimistic)."""
+    fe = np.asarray(m.predict(X), float)
+    var_f = float(np.var(fe, ddof=0))
+    Sigma = np.atleast_2d(np.asarray(m.cov_re))
+    var_a = float(np.mean(np.einsum("ij,jk,ik->i", Z, Sigma, Z)))
+    var_e = float(m.scale)
+    denom = var_f + var_a + var_e
+    return var_f / denom, (var_f + var_a) / denom
+
+
+def aic(llf, k):
+    return -2 * llf + 2 * k
+
+
+def lrt(ll_small, ll_big, ddof):
+    stat = 2 * (ll_big - ll_small)
+    return stat, float(chi2.sf(stat, ddof))  # boundary ⇒ conservative
+
+
+def r2(y, yhat):
+    y, yhat = np.asarray(y), np.asarray(yhat)
+    return 1.0 - ((y - yhat) ** 2).sum() / ((y - y.mean()) ** 2).sum()
+
+
+def rmse(y, yhat):
+    return float(np.sqrt(np.mean((np.asarray(y) - np.asarray(yhat)) ** 2)))
+```
+
+```{python}
+#| label: load-data
+#| output: false
+# Full 3RM frame (n≈422, all hazards).
+full = build_training_frame()
+full = full.dropna(subset=cerf_inform.REGRESSORS + [TGT, "iso3", "year"]).copy()
+full["year"] = full["year"].astype(int)
+FULL_CONT = ["inform_composite", "LogRequired", "LogTargeted"]
+
+# Conflict frame (n≈97, Xuan-corrected, 2018+).
+conf = load_conflict_training_frame()
+conf = conf[~conf["xuan_refugee_excluded"]].copy()
+conf = conf.dropna(
+    subset=cerf_conflict.REGRESSORS_A + [TGT, "ISO3", "Year"]
+).copy()
+conf["Year"] = conf["Year"].astype(int)
+CONF_CONT = list(cerf_conflict.REGRESSORS_A)
+
+# Tropical-cyclone outcome set (2016+), via the live CERF API + OCHA exposure.
+df_ocha = stratus.load_parquet_from_blob(
+    "ds-storm-impact-harmonisation/processed/adm0_ibtracs_exp_all.parquet"
+)
+tc = build_analysis_dataset_api(df_ocha)
+tc = tc[(tc["allocation_year"] >= 2016) & (tc["total_usd"] > 0)].copy()
+tc["ln_alloc"] = np.log(tc["total_usd"])
+
+# CERF RR history → country baselines (loaded once, reused for TC + conflict).
+all_rr = load_cerf_api_data(emergency_type=None)
+storm_codes = set(load_cerf_api_data(emergency_type="Storm")["ApplicationCode"])
+all_rr = all_rr.dropna(subset=["CountryCode", "Year", "TotalAmountApproved"])
+all_rr = all_rr.rename(columns={"CountryCode": "iso3", "Year": "year"})
+all_rr["year"] = all_rr["year"].astype(int)
+
+
+def annual(df_rr):
+    return (df_rr.groupby(["iso3", "year"])["TotalAmountApproved"].sum()
+            .reset_index().rename(columns={"TotalAmountApproved": "rr"}))
+
+
+annual_all = annual(all_rr)
+annual_nonstorm = annual(all_rr[~all_rr["ApplicationCode"].isin(storm_codes)])
+
+
+def asof_mean(table, iso3, year):
+    """Mean annual RR for a country over years strictly before `year`
+    (leakage-free by the temporal cut). NaN if no prior history."""
+    prior = table[(table["iso3"] == iso3) & (table["year"] < year)]
+    return float(prior["rr"].mean()) if len(prior) else np.nan
+```
+
+## 1. Random intercept on the full 3RM
+
+A random intercept `(1 | country)` lets each country sit at its own baseline
+level, with partial pooling. The first question is simply how much
+between-country variance there is to capture. The **intraclass correlation
+(ICC)** = σ²_country / (σ²_country + σ²_resid) is the share of *post-control*
+residual variance that lives between countries.
+
+```{python}
+#| label: full-icc
+dc, _ = center(full, FULL_CONT)
+m_ri_full, _ = fit_mixed(dc, cerf_inform.REGRESSORS, "iso3")
+vc = float(np.asarray(m_ri_full.cov_re).ravel()[0])
+vr = float(m_ri_full.scale)
+icc_full = vc / (vc + vr)
+print(f"sigma_country = {np.sqrt(vc):.3f}   sigma_resid = {np.sqrt(vr):.3f}"
+      f"   ICC = {icc_full:.4f}")
+```
+
+ICC ≈ 0.04 — only ~4% of leftover variance is between-country. This is *not*
+"countries are identical"; it is "`LogRequired`/`LogTargeted` already absorbed
+the country differences." We confirm it predictively with forward-chaining
+temporal CV (train years `< T`, predict year `T`; a country's intercept is its
+fitted random effect when it has appeared in training).
+
+```{python}
+#| label: full-ri-cv
+def temporal_ri_cv(df, fixed, group, cont, year_col, min_train=100, min_test=10):
+    rows_y, rows_pool, rows_mix, rows_known = [], [], [], []
+    for ty in sorted(df[year_col].unique()):
+        tr, te = df[df[year_col] < ty], df[df[year_col] == ty]
+        if len(tr) < min_train or len(te) < min_test:
+            continue
+        trc, mu = center(tr, cont)
+        tec, _ = center(te, cont, mu)
+        m_mix, ok = fit_mixed(trc, fixed, group)
+        if not ok:
+            continue
+        m_ols = sm.OLS(tr[TGT].astype(float), design(tr, fixed)).fit()
+        train_iso = set(tr[group])
+        re = m_mix.random_effects
+        fe = np.asarray(m_mix.predict(
+            sm.add_constant(tec[fixed], has_constant="add")), float)
+        bump = np.array([
+            float(np.asarray(re[g]).ravel()[0]) if g in train_iso and g in re
+            else 0.0 for g in te[group]])
+        rows_y.append(te[TGT].to_numpy())
+        rows_pool.append(np.asarray(m_ols.predict(design(te, fixed)), float))
+        rows_mix.append(fe + bump)
+        rows_known.append(te[group].isin(train_iso).to_numpy())
+    y = np.concatenate(rows_y)
+    pool, mix = np.concatenate(rows_pool), np.concatenate(rows_mix)
+    k = np.concatenate(rows_known)
+    return pd.DataFrame({
+        "Model": ["pooled OLS", "+ random intercept"],
+        "R² (all)": [r2(y, pool), r2(y, mix)],
+        "RMSE (all)": [rmse(y, pool), rmse(y, mix)],
+        "R² (known)": [r2(y[k], pool[k]), r2(y[k], mix[k])],
+        "n_test": [len(y), len(y)],
+    })
+
+
+full_ri = temporal_ri_cv(full, cerf_inform.REGRESSORS, "iso3", FULL_CONT, "year")
+(
+    GT(full_ri)
+    .tab_header(title="Full 3RM: pooled vs country random intercept",
+                subtitle="Forward-chaining temporal CV (known country, next event)")
+    .fmt_number(columns=["R² (all)", "RMSE (all)", "R² (known)"], decimals=4)
+)
+```
+
+The random intercept never improves a fold and is marginally worse overall —
+exactly what ICC ≈ 0 implies. The funding ask *is* the country signal, encoded
+per event.
+
+## 2. The leaky feature, and a de-leaked baseline (tropical cyclones)
+
+`02b`'s appendix used each country's *average annual RR spending* as a predictor
+of storm allocations. It looked strong — but a country's own storm allocations
+feed that average, so the outcome leaks into its own predictor. We compare it
+against two leakage-free constructions, all predicting `ln(total_usd)` on the
+2016+ TC allocations:
+
+- **C — leaky static**: mean annual RR across all types & years (02b's feature).
+- **D — non-storm static**: mean annual *non-storm* RR (removes the storm leak).
+- **D′ — non-storm as-of**: non-storm RR over *prior years only* (also removes
+  future information — the deployable form).
+
+```{python}
+#| label: tc-baselines
+#| output: false
+leaky = annual_all.groupby("iso3")["rr"].mean()
+nonstorm_static = annual_nonstorm.groupby("iso3")["rr"].mean()
+tc["ln_leaky"] = np.log(tc["iso3"].map(leaky).where(lambda s: s > 0))
+tc["ln_ns_static"] = np.log(tc["iso3"].map(nonstorm_static).where(lambda s: s > 0))
+tc["ln_ns_asof"] = np.log(pd.Series(
+    [asof_mean(annual_nonstorm, i, y)
+     for i, y in zip(tc["iso3"], tc["allocation_year"])],
+    index=tc.index).where(lambda s: s > 0))
+tc["ln_exp64"] = np.log(tc["pop_exp_64kt"].where(lambda s: s > 0))
+
+
+def loo_cv(d, preds):
+    y = d["ln_alloc"].to_numpy()
+    pred = np.empty(len(d))
+    idx = np.arange(len(d))
+    for i in idx:
+        tr, te = d.iloc[idx != i], d.iloc[[i]]
+        m = sm.OLS(tr["ln_alloc"].astype(float),
+                   sm.add_constant(tr[preds].astype(float), has_constant="add")).fit()
+        pred[i] = float(m.predict(
+            sm.add_constant(te[preds].astype(float), has_constant="add")).iloc[0])
+    return r2(y, pred), rmse(y, pred)
+```
+
+```{python}
+#| label: tc-decomposition
+# Same-rows comparison (rows where all three baselines exist) isolates the
+# leak: leave-one-out CV is valid for D/D′ because a held-out storm allocation
+# never enters its own non-storm baseline.
+trio = ["ln_leaky", "ln_ns_static", "ln_ns_asof"]
+cc = tc.dropna(subset=trio + ["ln_alloc"]).copy()
+rows = []
+for name, p in [("C  leaky static (02b)", ["ln_leaky"]),
+                ("D  non-storm static", ["ln_ns_static"]),
+                ("D′ non-storm as-of", ["ln_ns_asof"])]:
+    m = sm.OLS(cc["ln_alloc"].astype(float),
+               sm.add_constant(cc[p].astype(float), has_constant="add")).fit()
+    cvr2, _ = loo_cv(cc, p)
+    rows.append({"Feature": name, "In-sample AdjR²": m.rsquared_adj,
+                 "LOO-CV R²": cvr2})
+(
+    GT(pd.DataFrame(rows))
+    .tab_header(title=f"Country baseline on TC allocations (same {len(cc)} rows)",
+                subtitle="The leaky feature collapses out-of-sample once de-leaked")
+    .fmt_number(columns=["In-sample AdjR²", "LOO-CV R²"], decimals=3)
+)
+```
+
+On its own 47-row sample the leaky feature posts a LOO-CV R² ≈ 0.26 — **CV did
+not flag the leak.** Restricting to the common rows where a genuine non-storm
+history exists, its signal collapses to ≈ 0: it was self-prediction in the
+countries whose only CERF history is storms. The de-leaked as-of form (D′)
+retains only a small, fragile signal. The leaky feature is retired.
+
+## 3. The conflict model, tested the right way
+
+The conflict model (`02d`) already includes ACLED and IDMC. `02d` judged country
+structure by LOCO, which can't credit it. Here we use within-country temporal CV
+and ask, layer by layer, what carries out-of-sample signal.
+
+```{python}
+#| label: conflict-icc-cv
+CONTROLS = ["inform_composite", "LogTargeted", "LogRequired"]
+ACLED, IDMC, BASE = "LogMonthlyFatalities", "LogIDPs30d", "ln_base_asof"
+conf[BASE] = np.log(pd.Series(
+    [asof_mean(annual_all, i, y) for i, y in zip(conf["ISO3"], conf["Year"])],
+    index=conf.index).where(lambda s: s > 0))
+
+dcc, _ = center(conf, CONF_CONT)
+m_ri_conf, _ = fit_mixed(dcc, cerf_conflict.REGRESSORS_A, "ISO3")
+vc_c = float(np.asarray(m_ri_conf.cov_re).ravel()[0])
+icc_conf = vc_c / (vc_c + float(m_ri_conf.scale))
+
+SPECS = {
+    "S0 controls": CONTROLS,
+    "S1 + ACLED": CONTROLS + [ACLED],
+    "S2 + ACLED + IDMC (production)": CONTROLS + [ACLED, IDMC],
+    "S3 + as-of country baseline": CONTROLS + [ACLED, IDMC, "base_imp"],
+}
+agg = {k: [] for k in SPECS}
+agg["S4 + random intercept"] = []
+ys, knowns = [], []
+for ty in sorted(conf["Year"].unique()):
+    tr, te = conf[conf["Year"] < ty], conf[conf["Year"] == ty]
+    if len(tr) < 40 or len(te) < 8:
+        continue
+    bmean = tr[BASE].mean()
+    tr2 = tr.assign(base_imp=tr[BASE].fillna(bmean))
+    te2 = te.assign(base_imp=te[BASE].fillna(bmean))
+    trc, mu = center(tr2, CONF_CONT)
+    tec, _ = center(te2, CONF_CONT, mu)
+    m_mix, ok = fit_mixed(trc, cerf_conflict.REGRESSORS_A, "ISO3")
+    if not ok:
+        continue
+    train_iso = set(tr["ISO3"])
+    ys.append(te2[TGT].to_numpy())
+    knowns.append(te2["ISO3"].isin(train_iso).to_numpy())
+    for name, regs in SPECS.items():
+        m = sm.OLS(tr2[TGT].astype(float), design(tr2, regs)).fit()
+        agg[name].append(np.asarray(m.predict(design(te2, regs)), float))
+    re = m_mix.random_effects
+    fe = np.asarray(m_mix.predict(
+        sm.add_constant(tec[cerf_conflict.REGRESSORS_A], has_constant="add")), float)
+    bump = np.array([float(np.asarray(re[g]).ravel()[0])
+                     if g in train_iso and g in re else 0.0 for g in te2["ISO3"]])
+    agg["S4 + random intercept"].append(fe + bump)
+
+y = np.concatenate(ys)
+rows = [{"Spec": n, "R² (all)": r2(y, np.concatenate(p)),
+         "RMSE (all)": rmse(y, np.concatenate(p))} for n, p in agg.items()]
+(
+    GT(pd.DataFrame(rows))
+    .tab_header(
+        title=f"Conflict model — within-country temporal CV (ICC = {icc_conf:.4f})",
+        subtitle=f"n={len(y)} held-out. S0→S1 = ACLED's value; S1→S2 = IDMC's; "
+                 "S2→S3/S4 = country differentiation")
+    .fmt_number(columns=["R² (all)", "RMSE (all)"], decimals=4)
+)
+```
+
+Conflict ICC ≈ 0.0003 — even less between-country baseline variance than the
+full model, so the **random intercept (S4) again does not help**. **ACLED adds
+nothing** to allocation-*size* prediction even under this fair CV (S0→S1), while
+**IDMC genuinely helps** (S1→S2) despite its negative coefficient. The external
+as-of baseline (S3) gives a small, consistent bump — the only country lever with
+a positive sign.
+
+## 4. Random slopes — does the *effect* vary by country?
+
+A low intercept ICC says nothing about **slopes**: whether a predictor's *effect*
+varies by country. `02d` found exactly that for ACLED. We give random slopes the
+penalised in-sample assessment they never got (AIC + likelihood-ratio tests —
+the footing the production OLS was selected on), with temporal CV as a secondary,
+underpowered check. There is no leakage in a random slope, so the only risk is
+overfitting, which AIC/LRT address directly.
+
+```{python}
+#| label: slopes-table
+#| output: false
+def slope_suite(df, fixed, group, slope_var, cont):
+    dc, _ = center(df, cont)
+    nf = len(fixed) + 1
+    # ML (reml=False) so the mixed log-likelihoods are comparable to pooled OLS.
+    m_ols = sm.OLS(df[TGT].astype(float), design(df, fixed)).fit()
+    m_ri, _ = fit_mixed(dc, fixed, group, reml=False)
+    m_rs, _ = fit_mixed(dc, fixed, group, slope_var=slope_var, reml=False)
+    m_so, _ = fit_mixed(dc, fixed, group, slope_var=slope_var,
+                        intercept_re=False, reml=False)
+    tbl = pd.DataFrame({
+        "Model": ["pooled OLS", "+ random intercept",
+                  "+ intercept & slope", "+ slope only"],
+        "logLik": [m_ols.llf, m_ri.llf, m_rs.llf, m_so.llf],
+        "AIC": [aic(m_ols.llf, nf + 1), aic(m_ri.llf, nf + 2),
+                aic(m_rs.llf, nf + 4), aic(m_so.llf, nf + 2)],
+    })
+    _, p_so = lrt(m_ols.llf, m_so.llf, 1)
+    Xc = sm.add_constant(dc[fixed].astype(float), has_constant="add")
+    _, cond_rs = pseudo_r2(m_rs, Xc, re_design(dc, slope_var))
+    return tbl, p_so, m_ols.rsquared, cond_rs, m_rs, dc, slope_var, group
+
+
+full_tbl, full_pso, full_r2, full_cond, *_ = slope_suite(
+    full, cerf_inform.REGRESSORS, "iso3", "LogRequired", FULL_CONT)
+conf_tbl, conf_pso, conf_r2, conf_cond, m_rs_c, dc_c, sv_c, grp_c = slope_suite(
+    conf, cerf_conflict.REGRESSORS_A, "ISO3", "LogMonthlyFatalities", CONF_CONT)
+```
+
+```{python}
+#| label: slopes-full
+(
+    GT(full_tbl)
+    .tab_header(title="Full 3RM — random slope on LogRequired",
+                subtitle=f"slope-only LRT p={full_pso:.3f}; conditional R² "
+                         f"{full_cond:.3f} vs OLS {full_r2:.3f}. No heterogeneity.")
+    .fmt_number(columns=["logLik", "AIC"], decimals=2)
+)
+```
+
+```{python}
+#| label: slopes-conflict
+(
+    GT(conf_tbl)
+    .tab_header(title="Conflict — random slope on ACLED (LogMonthlyFatalities)",
+                subtitle=f"slope-only LRT p={conf_pso:.3f}; conditional R² "
+                         f"{conf_cond:.3f} vs OLS {conf_r2:.3f}. Real but marginal.")
+    .fmt_number(columns=["logLik", "AIC"], decimals=2)
+)
+```
+
+For the **full model** the slope on the funding ask is noise (slope-only AIC
+worse than pooled, LRT p ≈ 0.31). For the **conflict model** the ACLED
+slope-only model is the **best AIC** (−4.5 vs pooled), LRT p ≈ 0.011, and lifts
+in-sample conditional R² to ≈ 0.77 (+0.05). The decisive in-sample diagnostic is
+how much of `02d`'s raw per-country slope spread survives **shrinkage** (partial
+pooling): the raw OLS slopes are noisy 5–8-observation fits; the BLUPs are their
+shrunken, honest counterparts.
+
+```{python}
+#| label: fig-shrinkage
+#| fig-cap: "Conflict ACLED slope by country: raw per-country OLS (unpenalised, noisy) vs partial-pooled BLUP. Most of the −0.46→+0.71 raw spread is sampling noise, but the BLUPs keep their ordering — episodic-violence countries (HTI, YEM, SDN) positive, chronic (COD, SSD) shrunk toward zero. Dotted line = pooled slope."
+fixed_slope = float(m_rs_c.fe_params[sv_c])
+re = m_rs_c.random_effects
+blup = {g: fixed_slope + float(np.asarray(v).ravel()[1]) for g, v in re.items()}
+raw = {}
+for g, sub in conf.groupby(grp_c):
+    if len(sub) >= 5 and sub[sv_c].std() > 0:
+        mo = sm.OLS(sub[TGT].astype(float),
+                    design(sub, ["LogRequired", sv_c])).fit()
+        raw[g] = float(mo.params[sv_c])
+order = sorted(set(raw) & set(blup), key=lambda g: raw[g])
+plot_df = pd.concat([
+    pd.DataFrame({grp_c: order, "slope": [raw[g] for g in order], "kind": "raw OLS"}),
+    pd.DataFrame({grp_c: order, "slope": [blup[g] for g in order], "kind": "BLUP"}),
+])
+plot_df[grp_c] = pd.Categorical(plot_df[grp_c], categories=order)
+seg = pd.DataFrame({grp_c: order, "x": [raw[g] for g in order],
+                    "xend": [blup[g] for g in order]})
+seg[grp_c] = pd.Categorical(seg[grp_c], categories=order)
+(
+    ggplot()
+    + geom_vline(xintercept=fixed_slope, linetype="dotted", color="#999999")
+    + geom_segment(seg, aes(x="x", xend="xend", y=grp_c, yend=grp_c),
+                   color="#cccccc")
+    + geom_point(plot_df, aes(x="slope", y=grp_c, color="kind"), size=3)
+    + labs(x="Slope on log monthly fatalities (ACLED)", y="",
+           title="Shrinkage of per-country ACLED slopes")
+    + theme_minimal()
+)
+```
+
+```{python}
+#| label: conflict-slope-cv
+# Secondary check: temporal CV, paired Wilcoxon on squared errors (pooled vs
+# random-slope), explicitly underpowered at this n.
+ep, ers = [], []
+for ty in sorted(conf["Year"].unique()):
+    tr, te = conf[conf["Year"] < ty], conf[conf["Year"] == ty]
+    if len(tr) < 40 or len(te) < 8:
+        continue
+    trc, mu = center(tr, CONF_CONT)
+    tec, _ = center(te, CONF_CONT, mu)
+    m_rs, ok = fit_mixed(trc, cerf_conflict.REGRESSORS_A, "ISO3",
+                         slope_var=ACLED)
+    if not ok:
+        continue
+    m_ols = sm.OLS(tr[TGT].astype(float),
+                   design(tr, cerf_conflict.REGRESSORS_A)).fit()
+    train_iso = set(tr["ISO3"])
+    yv = te[TGT].to_numpy()
+    yp = np.asarray(m_ols.predict(design(te, cerf_conflict.REGRESSORS_A)), float)
+    fe = np.asarray(m_rs.predict(
+        sm.add_constant(tec[cerf_conflict.REGRESSORS_A], has_constant="add")), float)
+    re = m_rs.random_effects
+    bump = np.zeros(len(te))
+    for i, (g, xv) in enumerate(zip(te["ISO3"], tec[ACLED])):
+        if g in train_iso and g in re:
+            v = np.asarray(re[g]).ravel()
+            bump[i] = v[0] + v[1] * float(xv)
+    ep.append((yv - yp) ** 2)
+    ers.append((yv - (fe + bump)) ** 2)
+ep, ers = np.concatenate(ep), np.concatenate(ers)
+_, pw = wilcoxon(ep, ers)
+print(f"Temporal CV (n={len(ep)} held-out): RMSE pooled = {np.sqrt(ep.mean()):.4f}, "
+      f"random-slope = {np.sqrt(ers.mean()):.4f}; paired Wilcoxon p = {pw:.3f}")
+```
+
+Out-of-sample the random-slope model points the right way (lower RMSE) but the
+paired test cannot reject "no difference" at n≈43. So the conflict ACLED slope is
+a **real in-sample effect with an unconfirmed predictive payoff** — exactly the
+case where in-sample inference (which *detected* it) has power that CV at this *n*
+lacks. We leave it as an open question rather than changing the production model.
+
+## Conclusion
+
+| Form of country differentiation | Full 3RM | TC | Conflict |
+|---|---|---|---|
+| Random **intercept** | no (ICC 0.04) | under-identified | no (ICC 0.0003) |
+| External **baseline** covariate | near-circular | small, fragile | small, consistent |
+| Random **slope** | no (noise) | — | **open question** (real in-sample, OOS unconfirmed) |
+| 02b leaky "avg RR" feature | — | **leakage** (retired) | — |
+
+The production models stay **pooled**. The one live thread is the conflict ACLED
+random slope: it earns its keep on the in-sample criterion the incumbent was
+selected on, but its out-of-sample value awaits more data. The decision record —
+including the revisit triggers — is
+`docs/decisions/0001-country-differentiation-in-the-3rm.md`.
+
+Methodologically, this chapter is a worked example of three things to carry
+forward: match the **CV scheme to the question** (temporal for known-country, not
+LOCO); remember that **leakage is fixed in the feature, not by cross-validation**;
+and **report in-sample and out-of-sample together**, because at humanitarian-data
+sample sizes they have different and complementary power.
+```

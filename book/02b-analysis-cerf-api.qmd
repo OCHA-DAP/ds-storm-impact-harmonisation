@@ -1333,6 +1333,20 @@ is computed as a single country-level value (mean annual RR across all
 years and emergency types), not joined per-year, so every TC allocation
 for a given country receives the same predictor value.
 
+::: {.callout-warning}
+## This feature is leakage, not signal — do not use it
+
+A follow-up (`artefacts/17_tc_country_baseline_feature.py`) re-evaluated this
+feature under leakage-free, same-rows leave-one-out CV. Its apparent strength
+collapses from a LOO-CV R² of ~0.26 on its own sample to **~0.00** on the
+common rows: the signal lives entirely in countries whose only CERF history is
+storms, where the predictor is essentially their own storm spending predicting
+itself. A properly de-leaked, as-of (prior-years, non-storm-only) country
+baseline retains only modest, fragile signal (~0.12 at n=35). See
+`docs/decisions/0001-country-differentiation-in-the-3rm.md` for the decision to
+keep the 3RM pooled.
+:::
+
 ### Note: Cyclone-Specific Vulnerability Indices
 
 We explored whether an external cyclone-specific vulnerability index could
