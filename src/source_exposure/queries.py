@@ -340,6 +340,60 @@ def storms_with_source_exposure(engine, atcf_ids: list[str]):
             set(gd["atcf_id"]), set(ad["atcf_id"]))
 
 
+TIMELINE_TOTALS_BLOB = ("ds-storm-impact-harmonisation/processed/"
+                        "gdacs_timeline_totals.parquet")
+
+
+def gdacs_computed_thresholds(engine, atcf_ids: list[str]) -> set:
+    """{(atcf_id, wind_speed_kt)} where GDACS produced a POSITIVE per-country
+    exposure (it COMPUTED that threshold's footprint). For these, a country
+    ABSENT from the footprint at that threshold is a genuine 0 (your case 2)."""
+    if not atcf_ids:
+        return set()
+    df = pd.read_sql(_expand(
+        "SELECT DISTINCT l.atcf_id, g.wind_speed_kt FROM storms.gdacs_exposure g "
+        "JOIN storms.storm_id_lookup l ON l.gdacs_eventid = g.gdacs_eventid "
+        "WHERE l.atcf_id IN :atcf_ids AND g.admin_level = 0 AND g.pop_exposed > 0"),
+        engine, params={"atcf_ids": atcf_ids})
+    return set(zip(df["atcf_id"], df["wind_speed_kt"]))
+
+
+def gdacs_null_cells(engine, atcf_ids: list[str]) -> set:
+    """{(atcf_id, iso3, wind_speed_kt)} where GDACS has a row but pop_exposed IS
+    NULL (POP_AFFECTED = -1) — a per-cell DATA GAP (case 4 at the cell level).
+    These must stay NaN, never be zero-filled, even inside a computed storm."""
+    if not atcf_ids:
+        return set()
+    df = pd.read_sql(_expand(
+        "SELECT DISTINCT l.atcf_id, g.iso3, g.wind_speed_kt "
+        "FROM storms.gdacs_exposure g "
+        "JOIN storms.storm_id_lookup l ON l.gdacs_eventid = g.gdacs_eventid "
+        "WHERE l.atcf_id IN :atcf_ids AND g.admin_level = 0 "
+        "AND g.pop_exposed IS NULL"),
+        engine, params={"atcf_ids": atcf_ids})
+    return set(zip(df["atcf_id"], df["iso3"], df["wind_speed_kt"]))
+
+
+def load_timeline_totals():
+    """atcf_id-indexed GDACS storm-wide timeline totals (max pop39 / pop74).
+    The total is the only signal that separates a GENUINE zero (total = 0 →
+    fill GDACS 0) from MISSING per-country data (total > 0 → keep NaN). Built by
+    scripts/cache_gdacs_timeline_totals.py; reads the local mirror then blob.
+    Returns an EMPTY frame (no rows) if neither exists — callers then treat every
+    non-computed storm as 'unknown' (NaN), the safe default."""
+    from pathlib import Path
+    local = Path(__file__).resolve().parents[2] / "artefacts" / \
+        "gdacs_timeline_totals.parquet"
+    try:
+        df = pd.read_parquet(local) if local.exists() else \
+            stratus.load_parquet_from_blob(TIMELINE_TOTALS_BLOB)
+    except Exception:
+        return pd.DataFrame(
+            columns=["timeline_pop39_max", "timeline_pop74_max"]).set_index(
+            pd.Index([], name="atcf_id"))
+    return df.set_index("atcf_id")
+
+
 def storm_names(engine) -> pd.DataFrame:
     """atcf_id → human-readable storm name + tidy slug. Columns:
     atcf_id, storm_name, storm_slug."""

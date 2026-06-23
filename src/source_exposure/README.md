@@ -33,6 +33,7 @@ Compares storm-level population-exposure estimates from three sources —
 | `queries.py` | vendored/forked storms.* SQL (storm-final snap); adm1 matching delegates to `fm_matching` |
 | `build.py` | reproducibility driver (probe → blob → workbook, across the two envs) |
 | `style.py` | openpyxl styling (matches the OCHA book theme) |
+| `../../scripts/cache_gdacs_timeline_totals.py` | fetches the GDACS **storm totals** (`gettimeline` `pop39`/`pop74` max per storm) → blob `processed/gdacs_timeline_totals.parquet` (+ local mirror `artefacts/gdacs_timeline_totals.parquet`). Required input for case 3-vs-4 of the zero-vs-NaN rule. |
 | `out/` | generated outputs (gitignored) |
 
 ## Run
@@ -50,6 +51,14 @@ python -m src.source_exposure.build                       # rebuild the workbook
 python -m src.source_exposure.build --refresh-diagnostic  # re-run the ~15-20 min GDACS/ADAM probe first, re-upload to blob
 ```
 
+The workbook also reads the **GDACS storm-totals cache** (the timeline `pop39`/
+`pop74`), needed for the zero-vs-NaN rule. It is read from blob (or the local
+mirror); refresh it when storms are added — it hits the GDACS API, ~330 storms:
+
+```bash
+uv run python scripts/cache_gdacs_timeline_totals.py      # → blob + artefacts/ mirror
+```
+
 Needs `DSCI_AZ_*` env + dev DB/blob access.
 
 ## Design decisions (the non-obvious ones)
@@ -63,10 +72,30 @@ Needs `DSCI_AZ_*` env + dev DB/blob access.
   carries cleanly); `fm_pcode` at adm1 (lookups essential — GDACS/ADAM admins
   with no FieldMaps match surface as orphan rows; the workbook drops them, ~1.5%
   of GDACS / ~3% of ADAM adm1 exposed population).
-- **Zero vs blank:** CHD is our own NHC DB, so a missing value for a storm we
-  have is a true 0. GDACS/ADAM show 0 only when the source *reported* the storm;
-  where a source is blank the storms tab's `note_gdacs_adam` says why (reported
-  zero / GDACS server error 500 / WFP access denied 403 / no record).
+- **Zero vs NaN — the five-case rule (the subtle, important one).** CHD is our
+  own NHC DB, so a missing value for a storm we hold is a true 0. For **GDACS**,
+  each `(storm, country, threshold)` cell is filled **0** or left **NaN** by a
+  defensible rule. The crux: **GDACS `pop_exposed` NULL = `POP_AFFECTED = -1` =
+  "not computed" (a DATA GAP), NEVER a true 0** — systematic for GDACS's
+  ~2016–2022 era, where it lists the footprint countries but never computes their
+  population. The only signal that separates a *genuine* zero from *missing* data
+  is the GDACS **storm total** from the `gettimeline` endpoint (`pop39`/`pop74` —
+  the total inside the whole wind polygon, **storm-wide, NOT per country**):
+
+  | case | situation | fill |
+  |---|---|---|
+  | 1 | positive per-country value | the value |
+  | 2 | GDACS *computed* that threshold (≥1 positive country), this country **absent** | **0** (not in footprint) |
+  | 3 | GDACS **storm total = 0** (`pop39`/`pop74` = 0) | **0** (exposed nobody) |
+  | 4 | per-country `-1`/NULL, **or** no per-country value but **storm total > 0** | **NaN** (has a storm total, no per-country breakdown — do *not* call it 0) |
+  | 5 | storm not tracked, or 50 kt (GDACS has no 50 kt buffer) | **NaN** |
+
+  Because the timeline total is storm-wide, it **classifies** the storm but
+  cannot *fill* a per-country cell — so case-4 storms are NaN at the per-country
+  grain (recoverable only at the storm-total grain). ADAM follows the simple
+  contract: 0 for units a positive-reporting storm didn't list, else blank.
+  The storms tab's `note_gdacs_adam` / `gdacs_status` records each gap's reason
+  (`values_missing` = the `-1` case, `reported_zero`, `unservable`, `csv_403`, …).
 - **Thresholds:** 34 & 64 kt are common to all three; GDACS has no 50 kt, so
   50 kt is CHD-vs-ADAM only.
 

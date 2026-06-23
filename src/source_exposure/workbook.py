@@ -78,17 +78,51 @@ def build_exposure(engine, level: int, aids: list[str],
         ["atcf_id", "storm_name", "season"]]
     panel = panel.merge(meta, on="atcf_id", how="left")
 
-    # Zero vs blank (captured-vs-zero):
-    #   CHD comes from our own NHC DB → a missing value for a storm we have
-    #     is a genuine 0.
-    #   GDACS/ADAM → 0 for any unit a source did not list AS LONG AS the
-    #     source REPORTED the storm (has exposure for it); if the source
-    #     never reported the storm at all, leave blank (can't infer 0).
+    # Zero-vs-NaN fill — the five-case rule, decided per (storm, threshold):
+    #   CHD : own NHC DB → a missing value is a genuine 0.                 [always]
+    #   ADAM: 0 for units a positive-reporting storm didn't list.
+    #   GDACS: fill 0 ONLY when we can defend it, else keep NaN:
+    #     1 positive value            → use it
+    #     2 COMPUTED threshold,
+    #       country absent            → 0  (not in footprint)
+    #     3 GENUINE zero (timeline
+    #       total = 0)                → 0  (storm exposed nobody)
+    #     4 per-country MISSING
+    #       (timeline total > 0, or
+    #       an explicit -1 cell)      → NaN (GDACS has a total but no breakdown)
+    #     5 storm not tracked         → NaN
+    #   The timeline total is the ONLY signal separating case 3 from case 4.
     panel["chd_pop"] = panel["chd_pop"].fillna(0.0)
-    gd_rep = panel["atcf_id"].isin(gdacs_reports)
     ad_rep = panel["atcf_id"].isin(adam_reports)
-    panel.loc[gd_rep, "gdacs_pop"] = panel.loc[gd_rep, "gdacs_pop"].fillna(0.0)
     panel.loc[ad_rep, "adam_pop"] = panel.loc[ad_rep, "adam_pop"].fillna(0.0)
+
+    computed = q.gdacs_computed_thresholds(engine, aids)   # (atcf, kt) positive
+    null_cells = q.gdacs_null_cells(engine, aids)          # (atcf, iso3, kt) = -1
+    tl = q.load_timeline_totals()                          # atcf → pop39/pop74 max
+    _KTCOL = {34: "timeline_pop39_max", 64: "timeline_pop74_max"}
+
+    def _gd_fill0(atcf, kt):
+        if (atcf, int(kt)) in computed:        # case 2: absent country → 0
+            return True
+        col = _KTCOL.get(int(kt))              # 50 kt: GDACS has no buffer → NaN
+        if col and atcf in tl.index:
+            t = tl.loc[atcf, col]
+            if pd.notna(t):
+                return float(t) == 0.0         # case 3 → 0 ; case 4 → NaN
+        return False                           # not tracked / no timeline → NaN
+
+    fill = pd.Series(
+        [_gd_fill0(a, k) for a, k in zip(panel["atcf_id"], panel["wind_speed_kt"])],
+        index=panel.index)
+    # case 4 at cell level: an explicit -1 stays NaN ONLY inside a COMPUTED storm
+    # (a real footprint with one country's value missing). In a GENUINE-zero storm
+    # the total is 0, so even a -1 cell is a true 0 — don't exclude it there.
+    nullcell = pd.Series(
+        [((a, i, k) in null_cells) and ((a, int(k)) in computed) for a, i, k in
+         zip(panel["atcf_id"], panel["iso3"], panel["wind_speed_kt"])],
+        index=panel.index)
+    fill &= ~nullcell
+    panel.loc[fill, "gdacs_pop"] = panel.loc[fill, "gdacs_pop"].fillna(0.0)
 
     # `sources` = sources with a NON-BLANK value here (a reported source at
     # 0 IS listed; a source that never reported the storm is NOT).
