@@ -442,6 +442,187 @@ reconstruction testing:
 - **Storm surge**: wind radii + Holland's parametric model + HyFlux2
 - **Rainfall**: NASA GPM (previously NOAA eTRaP)
 
+## API Update Latency {#sec-api-latency}
+
+For the monitoring pipeline, the key operational question is how quickly each
+source has new data available after an NHC advisory. The two sources expose
+very different levels of metadata, so the measurements are not equivalent.
+
+### ADAM: episode publication lag
+
+ADAM includes an `updated_at` field on every episode record, enabling direct
+measurement of how long after an advisory ADAM finishes processing and
+publishes the episode. ADAM's `to_date` aligns with NHC advisory hours
+(03, 09, 15, 21 UTC), so lags are measured from the nominal advisory time.
+
+The script below fetches all episodes since 2022 in a single paginated pass
+— publication timestamps are in the listing metadata, so no per-storm CSV
+downloads are required.
+
+```{python}
+#| echo: true
+#| eval: false
+#| code-fold: false
+#| file: ../scripts/cache_adam_latency.py
+```
+
+```{python}
+#| label: adam-latency-plot
+import ocha_stratus as stratus
+from dotenv import load_dotenv
+
+load_dotenv()
+
+df_adam_lat = stratus.load_parquet_from_blob(
+    "ds-storm-impact-harmonisation/processed/adam_episode_latency.parquet"
+)
+df_adam_lat["lag_min"] = df_adam_lat["lag_hrs"] * 60
+
+palette = {"NOAA": "#3388ff", "JTWC": "#ff6600"}
+fig_adam = go.Figure()
+for source, color in palette.items():
+    vals = df_adam_lat.loc[df_adam_lat["source"] == source, "lag_min"]
+    n = len(vals)
+    fig_adam.add_trace(go.Histogram(
+        x=vals,
+        name=f"{source} (n={n:,})",
+        xbins=dict(start=0, end=360, size=15),
+        opacity=0.7,
+        marker_color=color,
+        histnorm="percent",
+    ))
+fig_adam.add_vline(
+    x=20,
+    line_dash="dot",
+    line_color="rgba(220,50,50,0.8)",
+    line_width=1.5,
+    annotation_text="20 min (pipeline send)",
+    annotation_position="top right",
+    annotation_font=dict(color="rgba(220,50,50,0.9)"),
+)
+fig_adam.update_layout(
+    barmode="overlay",
+    title="ADAM episode publication latency by source basin (2022–present)",
+    xaxis_title="Lag after NHC/JTWC advisory time (minutes)",
+    yaxis_title="Share of episodes (%)",
+    xaxis_range=[0, 360],
+    plot_bgcolor="white",
+    paper_bgcolor="white",
+    height=430,
+    margin=dict(l=50, r=30, t=60, b=50),
+    legend=dict(yanchor="top", y=0.95, x=0.6),
+)
+fig_adam.update_xaxes(gridcolor="rgba(0,0,0,0.06)", zeroline=False)
+fig_adam.update_yaxes(gridcolor="rgba(0,0,0,0.06)", zeroline=False)
+fig_adam.show()
+```
+
+For NOAA-sourced events (Atlantic and Eastern Pacific), 80% of episodes are
+published within 30 minutes of the NHC advisory time with a median of ~17
+minutes. JTWC-sourced events (Western Pacific and Indian Ocean) have a median
+lag of ~2.5 hours. Since the monitoring pipeline covers NOAA basins only, the
+JTWC lag is not a concern for our use case.
+
+### GDACS: GTS bulletin receipt lag
+
+GDACS does not expose per-episode publication timestamps, so we cannot measure
+directly when a processed episode becomes available. What we can measure is
+when GDACS **receives** the raw NHC bulletin via the WMO Global
+Telecommunication System (GTS).
+
+The GTS is push-based: NHC does not wait to be polled. When NHC finalises
+an advisory it transmits the bulletin onto the GTS network and all registered
+subscribers — including GDACS/JRC — receive it automatically within seconds.
+GDACS then parses the bulletin and runs the exposure calculation to produce
+the episode. The GTS receipt time (`pubdate` in the GDACS GTS endpoint) is
+therefore a **lower bound** on episode publication; the additional processing
+time is not observable from the API.
+
+NHC issues the `WTNT43` forecast/advisory bulletin (the product containing
+track position and wind radii at 34/50/64 kt) 5–15 minutes *before* the
+nominal advisory hour. We parse the actual issuance time from the WMO bulletin
+identifier and compute the lag relative to the nearest nominal advisory time
+for a like-for-like comparison with ADAM.
+
+```{python}
+#| echo: true
+#| eval: false
+#| code-fold: false
+#| file: ../scripts/cache_gdacs_latency.py
+```
+
+```{python}
+#| label: gdacs-latency-plot
+df_gdacs_lat = stratus.load_parquet_from_blob(
+    "ds-storm-impact-harmonisation/processed/gdacs_gts_latency.parquet"
+)
+df_gdacs_lat["lag_min"] = df_gdacs_lat["lag_hrs"] * 60
+n_gdacs = len(df_gdacs_lat)
+
+fig_gdacs = go.Figure()
+fig_gdacs.add_trace(go.Histogram(
+    x=df_gdacs_lat["lag_min"],
+    name=f"GDACS GTS receipt (n={n_gdacs:,})",
+    xbins=dict(start=-40, end=60, size=5),
+    marker_color="#2ca02c",
+    opacity=0.8,
+    histnorm="percent",
+))
+fig_gdacs.add_vline(
+    x=0,
+    line_dash="solid",
+    line_color="rgba(0,0,0,0.3)",
+    line_width=1,
+    annotation_text="Nominal advisory time",
+    annotation_position="top left",
+    annotation_font=dict(color="rgba(0,0,0,0.5)", size=11),
+)
+fig_gdacs.add_vline(
+    x=20,
+    line_dash="dot",
+    line_color="rgba(220,50,50,0.8)",
+    line_width=1.5,
+    annotation_text="20 min (pipeline send)",
+    annotation_position="top right",
+    annotation_font=dict(color="rgba(220,50,50,0.9)"),
+)
+fig_gdacs.update_layout(
+    title="GDACS GTS bulletin receipt latency — NOAA WTNT43 (2022–present)",
+    xaxis_title="Minutes relative to nominal NHC advisory time",
+    yaxis_title="Share of bulletins (%)",
+    xaxis_range=[-40, 60],
+    plot_bgcolor="white",
+    paper_bgcolor="white",
+    height=430,
+    margin=dict(l=50, r=30, t=60, b=50),
+    showlegend=True,
+    legend=dict(yanchor="top", y=0.95, x=0.01),
+)
+fig_gdacs.update_xaxes(gridcolor="rgba(0,0,0,0.06)", zeroline=False)
+fig_gdacs.update_yaxes(gridcolor="rgba(0,0,0,0.06)", zeroline=False)
+fig_gdacs.show()
+```
+
+The bulk of `WTNT43` bulletins arrive at GDACS 5–20 minutes **before** the
+nominal advisory time, reflecting NHC's practice of issuing slightly early.
+By the time the pipeline fires at +20 minutes, GDACS has had the raw bulletin
+data for ~25–35 minutes. The unobserved processing step sits between GTS
+receipt and the episode appearing in the API; based on the GDACS documentation
+noting a 30-minute ingestion cycle, this is likely sub-minute for parsing and
+a few minutes for the exposure calculation.
+
+### Pipeline timing summary
+
+| Source | What is measured | Median lag from advisory time |
+|---|---|---|
+| **GDACS** | GTS bulletin receipt (lower bound) | **~−10 min** (before advisory hour) |
+| **ADAM** | Episode published in API | **+17 min** |
+| Pipeline fires | — | **+20 min** |
+
+GDACS has the raw data well before the pipeline runs. ADAM publishes within
+the pipeline window for the majority of advisories. Both sources are
+operationally viable for NOAA basin storms at the current send time.
+
 ## IBTrACS Matching
 
 For integration with the CERF pipeline, GDACS events need to be matched
