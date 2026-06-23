@@ -34,14 +34,15 @@ REGRESSORS = [
     "LogRequired",
     "LogTargeted",
 ]
+REGRESSORS_NO_TARGETED = [r for r in REGRESSORS if r != "LogTargeted"]
 TARGET = "LogApproved"
 
 
-class PredictionInput(TypedDict):
+class PredictionInput(TypedDict, total=False):
     emergency_type: EmergencyType
     inform_composite: float
     funding_required: float  # USD
-    people_targeted: float   # count
+    people_targeted: float   # count; omit or 0 ⇒ no-targeted variant
 
 
 class PredictionResult(TypedDict):
@@ -56,22 +57,27 @@ class PredictionResult(TypedDict):
 
 # ── Fit ──────────────────────────────────────────────────────────────
 
-def fit_model(df: pd.DataFrame) -> sm.regression.linear_model.RegressionResultsWrapper:
-    """Fit OLS on the training frame.
+def fit_model(
+    df: pd.DataFrame,
+    regressors: list[str] = REGRESSORS,
+) -> sm.regression.linear_model.RegressionResultsWrapper:
+    """Fit OLS on the training frame for the given regressors.
 
-    Equivalent to `fit_3rm(df, ["inform_composite"])` in
-    book/02c-analysis-inform.qmd:500-505. Drops rows with NaN in any
-    required column.
+    Defaults to the full spec (with LogTargeted). Pass
+    `REGRESSORS_NO_TARGETED` for the early-decision variant where the
+    targeted-people figure isn't yet known.
     """
-    sub = df.dropna(subset=REGRESSORS + [TARGET])
-    X = sm.add_constant(sub[REGRESSORS].astype(float))
+    sub = df.dropna(subset=regressors + [TARGET])
+    X = sm.add_constant(sub[regressors].astype(float))
     return sm.OLS(sub[TARGET].astype(float), X).fit()
 
 
 # ── Predict ──────────────────────────────────────────────────────────
 
-def _design_row(inputs: PredictionInput) -> pd.DataFrame:
-    """Build the one-row design matrix matching fit_model's regressors."""
+def _design_row(
+    inputs: PredictionInput, regressors: list[str]
+) -> pd.DataFrame:
+    """Build the one-row design matrix matching `regressors`."""
     etype = inputs["emergency_type"]
     if etype not in ALLOWED_EMERGENCY_TYPES:
         raise ValueError(
@@ -79,16 +85,19 @@ def _design_row(inputs: PredictionInput) -> pd.DataFrame:
             f"got {etype!r}"
         )
     funding = float(inputs["funding_required"])
-    targeted = float(inputs["people_targeted"])
-    if funding <= 0 or targeted <= 0:
-        raise ValueError("funding_required and people_targeted must be > 0")
+    if funding <= 0:
+        raise ValueError("funding_required must be > 0")
 
     row = {dummy: 1.0 if etype == dummy else 0.0 for dummy in EMERGENCY_DUMMIES}
     row["inform_composite"] = float(inputs["inform_composite"])
     row["LogRequired"] = np.log(funding)
-    row["LogTargeted"] = np.log(targeted)
+    if "LogTargeted" in regressors:
+        targeted = float(inputs.get("people_targeted") or 0)
+        if targeted <= 0:
+            raise ValueError("people_targeted must be > 0 for the with-targeted spec")
+        row["LogTargeted"] = np.log(targeted)
 
-    X = pd.DataFrame([row], columns=REGRESSORS)
+    X = pd.DataFrame([row], columns=regressors)
     return sm.add_constant(X, has_constant="add")
 
 
@@ -96,14 +105,14 @@ def predict(
     model: sm.regression.linear_model.RegressionResultsWrapper,
     inputs: PredictionInput,
     alpha: float = 0.05,
+    regressors: list[str] = REGRESSORS,
 ) -> PredictionResult:
-    """Predict CERF allocation USD with 95% prediction interval.
+    """Predict CERF allocation USD with prediction interval at 1-alpha.
 
-    Returns both median (exp of log prediction) and mean (with σ²/2
-    correction for log-normal back-transform) on the USD scale. The
-    95% PI bounds are exponentiated from the log-scale observation CI.
+    Returns median (exp of log prediction) and mean (σ²/2 corrected) on
+    the USD scale, plus the prediction-interval bounds.
     """
-    X = _design_row(inputs)
+    X = _design_row(inputs, regressors)
     pred = model.get_prediction(X).summary_frame(alpha=alpha)
 
     log_pred = float(pred["mean"].iloc[0])
@@ -111,12 +120,10 @@ def predict(
     log_upper = float(pred["obs_ci_upper"].iloc[0])
     log_sigma = float(np.sqrt(model.scale))
 
-    # Per-feature contribution to the log prediction (excluding const).
-    # Useful for driver-bar visualization.
     row_values = X.iloc[0].to_dict()
     contributions = {
         name: float(model.params[name]) * float(row_values[name])
-        for name in REGRESSORS
+        for name in regressors
     }
 
     return {

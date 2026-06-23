@@ -31,20 +31,37 @@ def _load_data():
     import calendar
     import datetime as _dt
 
+    from src.datasets.conflict import load_conflict_training_frame
     from src.datasets.inform import (
         COUNTRY_TO_ISO3,
         build_training_frame,
         calc_inform_composite,
         load_inform,
     )
+    from src.models import cerf_conflict
     from src.models.cerf_inform import (
+        REGRESSORS,
+        REGRESSORS_NO_TARGETED,
         fit_model,
         predict,
     )
 
     inform_df = load_inform()
     training_df = build_training_frame(inform=inform_df)
-    model = fit_model(training_df)
+    # INFORM-base models: with and without LogTargeted.
+    model = fit_model(training_df, regressors=REGRESSORS)
+    model_no_t = fit_model(training_df, regressors=REGRESSORS_NO_TARGETED)
+
+    # Conflict-specific models: read corrected live training frame from blob,
+    # filter to Xuan-corrected sample, fit Models A (w/ Targeted) and B.
+    conflict_df_full = load_conflict_training_frame()
+    conflict_df = conflict_df_full[~conflict_df_full["xuan_refugee_excluded"]]
+    model_conflict_a = cerf_conflict.fit_model(
+        conflict_df, regressors=cerf_conflict.REGRESSORS_A
+    )
+    model_conflict_b = cerf_conflict.fit_model(
+        conflict_df, regressors=cerf_conflict.REGRESSORS_B
+    )
 
     # Country dropdown: filter to the 86 3RM countries with nice names
     # (intersected with INFORM Risk coverage so lookups always succeed).
@@ -85,19 +102,49 @@ def _load_data():
 
     refreshed = inform_df["refreshed_at"].iloc[0]
     return (
+        REGRESSORS,
+        REGRESSORS_NO_TARGETED,
         calc_inform_composite,
+        cerf_conflict,
         country_options,
         default_month_label,
         default_year,
         emergency_labels,
         inform_df,
         model,
+        model_conflict_a,
+        model_conflict_b,
+        model_no_t,
         month_options,
         predict,
         refreshed,
         training_df,
         year_options,
     )
+
+
+@app.cell
+def _load_conflict_context():
+    """Load small lookup parquets used only when emergency is DisplConfl.
+
+    ACLED:  global/acled/monthly_fatalities.parquet (~25k rows)
+    IDMC:   global/idmc/displacement_daily.parquet (Conflict-only, ~177k rows)
+
+    Both are pre-aggregated by `scripts/refresh_acled_monthly.py` and
+    `scripts/refresh_idmc_displacement.py`; the app just reads them.
+    """
+    import ocha_stratus as stratus
+
+    acled_monthly = stratus.load_parquet_from_blob(
+        "acled/monthly_fatalities.parquet",
+        stage="dev", container_name="global",
+    )
+    idmc_daily = stratus.load_parquet_from_blob(
+        "idmc/displacement_daily.parquet",
+        stage="dev", container_name="global",
+    )
+    idmc_daily = idmc_daily[idmc_daily["displacement_type"] == "Conflict"].copy()
+    return acled_monthly, idmc_daily
 
 
 @app.cell
@@ -166,12 +213,18 @@ def _inputs(
     )
     targeted = mo.ui.number(
         start=0, value=0,
-        label="People targeted",
+        label="People targeted (optional)",
     )
 
     _date_hint = mo.Html(
         "<div style='color:#888;font-size:0.8em;margin-top:-2px;'>"
         "Year and month default to today&rsquo;s date.</div>"
+    )
+    _targeted_hint = mo.Html(
+        "<div style='color:#888;font-size:0.8em;margin-top:-2px;'>"
+        "Leave <i>People targeted</i> at 0 to use the no-targeted model "
+        "variant (lower fit, but suitable when targeted-population isn&rsquo;t "
+        "yet known).</div>"
     )
 
     form = mo.vstack(
@@ -187,6 +240,7 @@ def _inputs(
             mo.hstack(
                 [funding, targeted], justify="start", align="center", gap=2,
             ),
+            _targeted_hint,
         ],
         gap=0.5,
         align="start",
@@ -294,6 +348,59 @@ def _derive_composite(
 
 
 @app.cell
+def _derive_conflict_context(
+    acled_monthly, country, emergency, idmc_daily, month, year,
+):
+    """Auto-lookup ACLED monthly fatalities + IDMC 30d at the alloc-period.
+
+    Active only when emergency type == DisplConfl. Otherwise returns
+    `{"active": False}` and the prediction path uses the INFORM-base model.
+
+    For the IDMC lookup we need a specific date; user picks year + month.
+    We use the **last day of the selected month** (most recent IDMC
+    snapshot for that period). If month is "annual", we fall back to
+    Dec 31 of the year.
+    """
+    import calendar as _cal
+    import pandas as _pd
+
+    if emergency.value != "DisplConfl":
+        conflict_ctx = {"active": False, "fatalities": 0.0, "idps_30d": 0.0,
+                        "missing_acled": False, "missing_idmc": False,
+                        "lookup_date": None}
+    else:
+        _yr = int(year.value)
+        _mo = 12 if month.value == "none" else int(month.value)
+        _last_day = _cal.monthrange(_yr, _mo)[1]
+        _lookup_date = _pd.Timestamp(year=_yr, month=_mo, day=_last_day)
+
+        _ac = acled_monthly[
+            (acled_monthly["iso3"] == country.value)
+            & (acled_monthly["year"] == _yr)
+            & (acled_monthly["month"] == _mo)
+        ]
+        _fat = float(_ac["fatalities"].iloc[0]) if len(_ac) else 0.0
+        _missing_acled = len(_ac) == 0
+
+        _idmc = idmc_daily[
+            (idmc_daily["iso3"] == country.value)
+            & (idmc_daily["date"] == _lookup_date)
+        ]
+        _idp = float(_idmc["displacement_30d"].iloc[0]) if len(_idmc) else 0.0
+        _missing_idmc = len(_idmc) == 0
+
+        conflict_ctx = {
+            "active": True,
+            "fatalities": _fat,
+            "idps_30d": _idp,
+            "missing_acled": _missing_acled,
+            "missing_idmc": _missing_idmc,
+            "lookup_date": _lookup_date,
+        }
+    return (conflict_ctx,)
+
+
+@app.cell
 def _top_layout(form, inform_panel, mo):
     mo.hstack(
         [form, inform_panel],
@@ -307,35 +414,88 @@ def _top_layout(form, inform_panel, mo):
 
 @app.cell
 def _predict_cell(
+    REGRESSORS,
+    REGRESSORS_NO_TARGETED,
+    cerf_conflict,
+    conflict_ctx,
     emergency,
     funding,
     lookup,
     model,
+    model_conflict_a,
+    model_conflict_b,
+    model_no_t,
     predict,
     targeted,
 ):
+    """Pick the right model and produce a prediction.
+
+    Routing matrix:
+        emergency_type     | targeted > 0  | model
+        ───────────────────┼───────────────┼──────────────────
+        DisplConfl         | yes           | conflict A
+        DisplConfl         | no            | conflict B
+        anything else      | yes           | INFORM (with targeted)
+        anything else      | no            | INFORM (no targeted)
+    """
+    is_conflict = emergency.value == "DisplConfl"
+    has_targeted = targeted.value is not None and float(targeted.value) > 0
+
+    state = "ok"
+    result = None
+    active_model = None
+
     if lookup is None:
-        state, result = "no_inform", None
-    elif (
-        funding.value is None
-        or targeted.value is None
-        or float(funding.value) <= 0
-        or float(targeted.value) <= 0
-    ):
-        state, result = "missing_inputs", None
+        state = "no_inform"
+    elif funding.value is None or float(funding.value) <= 0:
+        state = "missing_inputs"
     else:
-        state = "ok"
-        result = predict(
-            model,
-            {
-                "emergency_type": emergency.value,
-                "inform_composite": lookup["composite"],
-                "funding_required": float(funding.value),
-                "people_targeted": float(targeted.value),
-            },
-            alpha=0.20,  # 80% prediction interval
-        )
-    return result, state
+        if is_conflict:
+            if has_targeted:
+                _chosen = model_conflict_a
+                _regs = cerf_conflict.REGRESSORS_A
+                _label = "Conflict, with Targeted"
+            else:
+                _chosen = model_conflict_b
+                _regs = cerf_conflict.REGRESSORS_B
+                _label = "Conflict, without Targeted"
+            result = cerf_conflict.predict(
+                _chosen,
+                {
+                    "inform_composite": lookup["composite"],
+                    "funding_required": float(funding.value),
+                    "people_targeted": float(targeted.value or 0),
+                    "monthly_fatalities": float(conflict_ctx["fatalities"]),
+                    "idps_30d": float(conflict_ctx["idps_30d"]),
+                },
+                alpha=0.20, regressors=_regs,
+            )
+        else:
+            if has_targeted:
+                _chosen = model
+                _regs = REGRESSORS
+                _label = "INFORM-base, with Targeted"
+            else:
+                _chosen = model_no_t
+                _regs = REGRESSORS_NO_TARGETED
+                _label = "INFORM-base, without Targeted"
+            result = predict(
+                _chosen,
+                {
+                    "emergency_type": emergency.value,
+                    "inform_composite": lookup["composite"],
+                    "funding_required": float(funding.value),
+                    "people_targeted": float(targeted.value or 0),
+                },
+                alpha=0.20, regressors=_regs,
+            )
+        active_model = {
+            "label": _label,
+            "n": int(_chosen.nobs),
+            "adj_r2": float(_chosen.rsquared_adj),
+            "aic": float(_chosen.aic),
+        }
+    return active_model, result, state
 
 
 @app.cell
@@ -441,10 +601,69 @@ def _prediction_plot(mo, result, state):
 
 
 @app.cell
-def _prediction_layout(chart, mo, numbers):
+def _conflict_context_panel(conflict_ctx, country, mo):
+    """Display the auto-looked-up ACLED + IDMC values when in conflict mode."""
+    def _fmt(v: float) -> str:
+        if v >= 1e6:
+            return f"{v / 1e6:.2f}M"
+        if v >= 1e3:
+            return f"{v / 1e3:.1f}K"
+        return f"{v:.0f}"
+
+    if not conflict_ctx["active"]:
+        conflict_panel = mo.md("")
+    else:
+        _date_label = (conflict_ctx["lookup_date"].strftime("%b %Y")
+                       if conflict_ctx["lookup_date"] is not None else "—")
+        _fat_note = (" <span style='color:#c46;font-size:0.85em;'>(no events recorded)</span>"
+                     if conflict_ctx["missing_acled"] else "")
+        _idp_note = (" <span style='color:#c46;font-size:0.85em;'>(no IDMC record)</span>"
+                     if conflict_ctx["missing_idmc"] else "")
+        conflict_panel = mo.Html(
+            f"""
+<div style="background:#fdf6ec;border-left:3px solid #d9a43a;
+            padding:10px 14px;border-radius:4px;font-size:0.9em;
+            color:#333;margin-bottom:8px;display:inline-block;">
+  <div style="font-size:0.7em;text-transform:uppercase;letter-spacing:0.05em;
+              color:#7a5d1a;font-weight:600;margin-bottom:4px;">
+    Auto-looked-up conflict covariates &nbsp;·&nbsp; {country.value} &nbsp;·&nbsp; {_date_label}
+  </div>
+  <span><b>ACLED monthly fatalities:</b> {_fmt(conflict_ctx['fatalities'])}{_fat_note}</span>
+  &nbsp;&nbsp;·&nbsp;&nbsp;
+  <span><b>IDMC IDPs (30-day rolling):</b> {_fmt(conflict_ctx['idps_30d'])}{_idp_note}</span>
+</div>
+"""
+        )
+    return (conflict_panel,)
+
+
+@app.cell
+def _model_banner(active_model, mo):
+    if active_model is None:
+        banner = mo.md("")
+    else:
+        banner = mo.Html(
+            f"""
+<div style="background:#eef3f8;border-left:3px solid #2166ac;
+            padding:8px 12px;border-radius:4px;font-size:0.88em;
+            color:#234;margin-bottom:6px;display:inline-block;">
+  <b>Model in use:</b> {active_model['label']} &nbsp;·&nbsp;
+  n = {active_model['n']} &nbsp;·&nbsp;
+  Adj R² = {active_model['adj_r2']:.3f} &nbsp;·&nbsp;
+  AIC = {active_model['aic']:.1f}
+</div>
+"""
+        )
+    return (banner,)
+
+
+@app.cell
+def _prediction_layout(banner, chart, conflict_panel, mo, numbers):
     mo.vstack(
         [
             mo.md("## Predicted allocation"),
+            conflict_panel,
+            banner,
             mo.hstack(
                 [chart, numbers],
                 widths=[3, 1],
@@ -459,23 +678,47 @@ def _prediction_layout(chart, mo, numbers):
 
 
 @app.cell
-def _technical_note(mo, model, refreshed):
+def _technical_note(mo, model, model_conflict_a, model_conflict_b, model_no_t, refreshed):
     mo.accordion({
         "Technical note": mo.md(
             f"""
-**Model.** Ordinary least squares on ln(CERF allocation USD), fit on
-{int(model.nobs)} rapid-response allocations from 2016 onward.
-Adjusted R² = {model.rsquared_adj:.3f}. AIC = {model.aic:.1f}.
+**Four model variants** are pre-fit at startup. Which one runs depends on
+the **emergency type** and whether **People targeted** is provided
+(non-zero):
 
-**Features.** Eight emergency-type dummies (base = "Any Other"):
-Storm, Flood, Drought, Other Natural Disaster, Cholera, Ebola, Other
-Health Emergency, Displacement and Conflict. INFORM Composite (0–10).
-ln(funding required). ln(people targeted).
+| Emergency | People targeted | Model | n | Adj R² | AIC |
+|---|---|---|---|---|---|
+| any (non-conflict) | provided | INFORM-base, with Targeted | {int(model.nobs)} | {model.rsquared_adj:.3f} | {model.aic:.1f} |
+| any (non-conflict) | left at 0 | INFORM-base, without Targeted | {int(model_no_t.nobs)} | {model_no_t.rsquared_adj:.3f} | {model_no_t.aic:.1f} |
+| Displacement & Conflict | provided | Conflict, with Targeted | {int(model_conflict_a.nobs)} | {model_conflict_a.rsquared_adj:.3f} | {model_conflict_a.aic:.1f} |
+| Displacement & Conflict | left at 0 | Conflict, without Targeted | {int(model_conflict_b.nobs)} | {model_conflict_b.rsquared_adj:.3f} | {model_conflict_b.aic:.1f} |
 
-**Data sources.** CERF 3RM v1.8 spreadsheet; INFORM Risk via DRMKC API;
-INFORM Severity via ACAPS (blob). The Composite is the mean of Risk
-and Severity for country-months with both available, otherwise Risk
-alone.
+The two **without-Targeted** variants are useful when a targeted-population
+estimate isn't yet available at allocation-decision time. The fit is
+materially weaker (larger prediction interval), so prefer the with-Targeted
+variant whenever possible.
+
+The **conflict-specific** variants (Models A and B) are fit on a separate
+training set of 97 conflict-typed allocations from 2018 onward
+(ch. 02d), with monthly ACLED fatalities and 30-day IDMC IDPs as
+additional regressors. The vulnerability index is `inform_composite`
+(substituting for Finn's CIRV; ~1% Adj R² gap per ch. 02d).
+
+**Features (INFORM-base).** Eight emergency-type dummies (base = "Any
+Other"): Storm, Flood, Drought, Other Natural Disaster, Cholera, Ebola,
+Other Health Emergency, Displacement and Conflict. INFORM Composite
+(0–10). ln(funding required). ln(people targeted) when applicable.
+
+**Features (Conflict).** INFORM Composite. ln(funding required).
+ln(people targeted) when applicable. ln(monthly fatalities + 1).
+ln(IDPs 30d + 1).
+
+**Data sources.** CERF 3RM v1.8 spreadsheet; CERF conflict-model xlsx
+(Zimmermann 2025); INFORM Risk via DRMKC API; INFORM Severity via ACAPS
+(blob); ACLED conflict events via hdx-signals; IDMC daily IDP updates
+(refreshed by `scripts/refresh_idmc_displacement.py`). The INFORM
+Composite is the mean of Risk and Severity for country-months with both
+available, otherwise Risk alone.
 
 **Back-transform.** The model predicts ln(USD). The **median** USD is
 exp(ln-prediction). The **80% prediction interval** bounds are
