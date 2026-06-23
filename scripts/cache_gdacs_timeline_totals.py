@@ -54,9 +54,12 @@ def fetch_one(atcf_id: str, eid: int) -> dict:
         tl = get_timeline(int(eid))
         p39 = pd.to_numeric(tl.get("pop39"), errors="coerce")
         p74 = pd.to_numeric(tl.get("pop74"), errors="coerce")
+        # NaN (not 0) when the timeline carries NO value — a 0 here would be read
+        # downstream as a GENUINE zero (case 3) and wrongly fill GDACS 0. Only a
+        # real numeric max (incl. a true 0, as for weak storms) is a genuine zero.
         return {**base,
-                "timeline_pop39_max": float(p39.max()) if p39.notna().any() else 0.0,
-                "timeline_pop74_max": float(p74.max()) if p74.notna().any() else 0.0,
+                "timeline_pop39_max": float(p39.max()) if p39.notna().any() else None,
+                "timeline_pop74_max": float(p74.max()) if p74.notna().any() else None,
                 "n_advisories": int(len(tl)), "status": "ok"}
     except Exception as e:  # noqa: BLE001 - record the failure, don't abort the sweep
         return {**base, "timeline_pop39_max": None, "timeline_pop74_max": None,
