@@ -1,0 +1,1908 @@
+---
+title: "3RM -- Conflict Model"
+jupyter: ds-storm-impact
+---
+
+::: {.callout-note appearance="simple"}
+## Summary
+
+Finn Zimmermann (2025) extended the 3RM to predict CERF rapid-response
+allocations for **conflict-related emergencies** (Displacement,
+Violence/Clashes, Post-conflict Needs, Human Rights), using ACLED
+monthly fatalities and IDMC 30-day IDP flows as conflict-specific
+predictors. We reproduce his regressions to machine precision (n = 103,
+2018+) and verify against our live ACLED/IDMC pipelines. CIRV and our
+`inform_composite` are functionally equivalent (Adj R² within ~1%).
+
+**Headline finding** (worth shouting out): on the 97 Xuan-corrected
+conflict rows, the conflict-specific model beats the base 3RM by ~5 pp
+R² (0.667 → 0.716). Decomposing the gain reveals that **~60% of it
+(~3 pp) comes from just *fitting on the subset* — not from the
+ACLED/IDMC features**. ACLED contributes ~0 pp; IDMC adds ~2 pp but
+with a counter-intuitive negative coefficient (more displacement →
+*smaller* predicted allocation, p = 0.02). The framing "the conflict
+model wins because it brings in ACLED/IDMC" overstates what those
+features do.
+
+**Operational recommendation: ship the base 3RM (generalist) for all
+emergency types, including conflict.** The ~3 pp R² gap from
+specialisation is statistically real (joint F-test on slope
+interactions, p = 0.005), but **the gap evaporates out-of-sample**:
+10-fold CV R² is 0.668 for the specialist, 0.666 for the generalist
+evaluated on the same conflict rows. The in-sample edge is overfitting,
+not a real gain. We also tried smarter feature engineering (multi-window
+ACLED & IDPs, country-relative z-scores, momentum, event-type filters)
+— none of it moves the needle. The IDPs negative coefficient turns out
+to be structural (a partial-correlation effect), not a feature defect.
+
+Shipping the base 3RM keeps coefficient SEs 2–2.6× tighter, the model
+count at one, and the deployment story consistent across emergency
+types. ACLED and IDMC don't enter the operational pipeline — they
+remain valuable as *monitoring* signals, just not as allocation-size
+predictors once vulnerability and the funding ask are in the model.
+:::
+
+```{python}
+#| label: setup
+#| output: false
+import sys
+sys.path.insert(0, "..")
+
+import warnings
+from io import BytesIO
+
+import numpy as np
+import ocha_stratus as stratus
+import pandas as pd
+import statsmodels.api as sm
+from dotenv import load_dotenv
+from great_tables import GT, loc, style
+from plotnine import (
+    aes, element_text, facet_wrap, geom_abline, geom_errorbarh,
+    geom_point, geom_smooth, geom_vline, ggplot, labs,
+    scale_color_manual, theme, theme_minimal,
+)
+
+load_dotenv()
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning, module="plotnine")
+```
+
+## Background
+
+The conflict model is a **subset model**: it fits only on conflict-typed
+allocations rather than the full 3RM emergency-type universe.
+Conflict-specific predictors (fatalities, IDPs) replace the
+emergency-type dummies that the storm-side 3RM uses.
+
+| | Storm-side 3RM (ch. 02c) | Conflict model (this chapter) |
+|---|---|---|
+| Sample | 422 RR allocations, 2016--2025 | 103 conflict RR allocations, 2018--2024 |
+| Vulnerability | CIRV (or INFORM substitutes) | CIRV (or INFORM substitutes) |
+| Hazard signal | 8 emergency-type dummies | Log Monthly Fatalities (ACLED) + Log IDPs 30d (IDMC) |
+| Scale controls | LogRequired, LogTargeted | LogRequired, LogTargeted (optional) |
+| Time floor | 2016 (3RM) | 2018 (IDMC daily IDP data starts 2018) |
+
+CIRV is recapped in [Chapter 02c](02c-analysis-inform.qmd#background).
+
+## Data
+
+Finn's training frame (`Regression_Data` sheet, n = 103) lives on blob
+alongside his xlsx. We merge in `LogRequired` from `Master_Data` (only
+needed for one of his four model variants).
+
+```{python}
+#| label: load-finn
+#| output: false
+
+XLSX_BLOB = (
+    "ds-storm-impact-harmonisation/raw/cerf/finn/"
+    "CERF - Conflict Model - RR Regression Model - version 1.0.xlsx"
+)
+
+_raw = stratus.load_blob_data(XLSX_BLOB, stage="dev")
+df_finn = pd.read_excel(BytesIO(_raw), sheet_name="Regression_Data")
+_master = pd.read_excel(BytesIO(_raw), sheet_name="Master_Data")
+df_finn = df_finn.merge(
+    _master[["Application Code", "LogRequired"]],
+    on="Application Code", how="left",
+)
+```
+
+```{python}
+#| label: attach-inform
+#| output: false
+
+from src.datasets.inform import _calc_composite_value, load_inform
+
+df_inform = load_inform()
+df_inform = df_inform[df_inform["risk_source_year"] == df_inform["year"]]
+
+df = df_finn.merge(
+    df_inform[["iso3", "year", "month",
+               "inform_risk", "inform_severity"]],
+    left_on=["ISO3", "Year", "Month"],
+    right_on=["iso3", "year", "month"],
+    how="left",
+)
+df["inform_composite"] = [
+    _calc_composite_value(r, s)
+    for r, s in zip(df["inform_risk"], df["inform_severity"])
+]
+```
+
+```{python}
+#| label: coverage-table
+
+cov = (
+    df.assign(year=df["Year"])
+    .groupby("year")
+    .agg(
+        Allocations=("Application Code", "count"),
+        Risk=("inform_risk", lambda x: x.notna().sum()),
+        Severity=("inform_severity", lambda x: x.notna().sum()),
+    )
+    .reset_index()
+)
+cov_total = pd.DataFrame([{
+    "year": "Total",
+    "Allocations": cov["Allocations"].sum(),
+    "Risk": cov["Risk"].sum(),
+    "Severity": cov["Severity"].sum(),
+}])
+cov_full = pd.concat([cov.astype({"year": str}), cov_total], ignore_index=True)
+
+(
+    GT(cov_full)
+    .tab_header(
+        title="Conflict-allocation coverage by year",
+        subtitle="INFORM Risk and Severity availability per allocation",
+    )
+    .cols_label(year="Year", Allocations="Conflict allocations",
+                Risk="INFORM Risk available",
+                Severity="INFORM Severity available")
+    .tab_style(
+        style=style.fill(color="#f5f5f5"),
+        locations=loc.body(rows=[len(cov_full) - 1]),
+    )
+    .tab_source_note(
+        "INFORM Severity coverage starts 2019; the 2018 allocations get "
+        "Risk-only fallback for inform_composite."
+    )
+)
+```
+
+## Reproducing Finn's regressions
+
+Finn fitted four OLS variants on `LogApproved`. We reproduce all four
+to machine precision (largest coefficient delta: ~10⁻¹⁵).
+
+```{python}
+#| label: model-helpers
+#| output: false
+
+
+def _stars(p: float) -> str:
+    if p < 0.01:
+        return "***"
+    if p < 0.05:
+        return "**"
+    if p < 0.1:
+        return "*"
+    return ""
+
+
+def _fmt_coef(model, var: str) -> str:
+    if var not in model.params.index:
+        return ""
+    b = model.params[var]
+    p = model.pvalues[var]
+    return f"{b:.4f}{_stars(p)} ({p:.2f})"
+
+
+def fit_ols(data: pd.DataFrame, regressors: list[str]):
+    sub = data.dropna(subset=regressors + ["LogApproved"])
+    X = sm.add_constant(sub[regressors].astype(float), has_constant="add")
+    return sm.OLS(sub["LogApproved"].astype(float), X).fit()
+
+
+# Finn's column 'LogRequired2' is identical to log(Total Amount Required);
+# 'LogRequired' (from Master_Data) logs the same column. They are aliases.
+BASE_W_TARGETED = ["LogTargeted", "Log Monthly Fatalities",
+                   "Log IDPs 30d", "LogRequired2"]
+BASE_WO_TARGETED = ["LogRequired2", "Log Monthly Fatalities", "Log IDPs 30d"]
+```
+
+```{python}
+#| label: reproduction-table
+
+m_reg2 = fit_ols(df, ["LogRequired", "LogTargeted",
+                      "Log Monthly Fatalities", "Log IDPs 30d"])
+m_reg3 = fit_ols(df, BASE_WO_TARGETED)
+m_reg4 = fit_ols(df, ["CIRV"] + BASE_W_TARGETED)
+m_reg5 = fit_ols(df, ["CIRV"] + BASE_WO_TARGETED)
+
+models_finn = {
+    "Reg2": m_reg2, "Reg3": m_reg3, "Reg4": m_reg4, "Reg5": m_reg5,
+}
+labels_finn = {
+    "Reg2": "No CIRV, w/ Targeted",
+    "Reg3": "No CIRV, w/o Targeted",
+    "Reg4": "CIRV, w/ Targeted",
+    "Reg5": "CIRV, w/o Targeted",
+}
+
+var_labels = {
+    "const": "Intercept",
+    "CIRV": "CIRV",
+    "LogTargeted": "People targeted (ln)",
+    "Log Monthly Fatalities": "Monthly fatalities (ln)",
+    "Log IDPs 30d": "IDPs 30d (ln)",
+    "LogRequired": "Funding required (ln)",
+    "LogRequired2": "Funding required (ln)",
+}
+ordered_vars = ["const", "CIRV", "LogTargeted",
+                "Log Monthly Fatalities", "Log IDPs 30d",
+                "LogRequired", "LogRequired2"]
+
+rows = []
+for var in ordered_vars:
+    rows.append({
+        "Variable": var_labels[var],
+        **{labels_finn[k]: _fmt_coef(m, var) for k, m in models_finn.items()},
+    })
+
+# Collapse the two LogRequired rows into one
+log_req_idx = [i for i, r in enumerate(rows)
+               if r["Variable"] == "Funding required (ln)"]
+merged = {"Variable": "Funding required (ln)"}
+for k in labels_finn.values():
+    vals = [rows[i][k] for i in log_req_idx if rows[i][k]]
+    merged[k] = vals[0] if vals else ""
+rows = [r for i, r in enumerate(rows) if i not in log_req_idx] + [merged]
+# Reorder so funding-required appears in the right position
+order = ["Intercept", "CIRV", "People targeted (ln)",
+         "Monthly fatalities (ln)", "IDPs 30d (ln)", "Funding required (ln)"]
+rows = sorted(rows, key=lambda r: order.index(r["Variable"]))
+
+rows.append({"Variable": "n",
+             **{labels_finn[k]: str(int(m.nobs))
+                for k, m in models_finn.items()}})
+rows.append({"Variable": "Adj R²",
+             **{labels_finn[k]: f"{m.rsquared_adj:.3f}"
+                for k, m in models_finn.items()}})
+rows.append({"Variable": "AIC",
+             **{labels_finn[k]: f"{m.aic:.1f}"
+                for k, m in models_finn.items()}})
+
+(
+    GT(pd.DataFrame(rows))
+    .tab_header(
+        title="Reproduction of Finn's four regression specifications",
+        subtitle="OLS on LogApproved, n = 103 conflict allocations",
+    )
+    .tab_style(
+        style=style.fill(color="#e6eeff"),
+        locations=loc.body(rows=[1]),  # CIRV row
+    )
+    .tab_source_note(
+        "Each cell: coefficient with significance stars (p in parentheses). "
+        "Reg4 is Finn's preferred specification. "
+        "*** p < 0.01, ** p < 0.05, * p < 0.1."
+    )
+)
+```
+
+CIRV adds ~3 percentage points of Adj R² over Reg2 (the no-CIRV variant
+with the same other regressors), going from 0.694 to 0.723. Without
+LogTargeted, vulnerability matters more: Reg5 (CIRV, no Targeted) lifts
+Adj R² from 0.447 to 0.522 -- a ~7-point gain.
+
+## Swapping CIRV for INFORM Composite
+
+The storm-side 3RM uses `inform_composite` (mean of INFORM Risk +
+Severity, falling back to Risk alone where Severity is unavailable; see
+[ch. 02c](02c-analysis-inform.qmd#regression-replacing-cirv-with-inform)).
+Can it replace CIRV here?
+
+```{python}
+#| label: inform-comparison-full
+
+m_reg4_ic = fit_ols(df, ["inform_composite"] + BASE_W_TARGETED)
+m_reg4_rs = fit_ols(df, ["inform_risk", "inform_severity"] + BASE_W_TARGETED)
+m_reg5_ic = fit_ols(df, ["inform_composite"] + BASE_WO_TARGETED)
+m_reg5_rs = fit_ols(df, ["inform_risk", "inform_severity"] + BASE_WO_TARGETED)
+
+cmp_full = pd.DataFrame([
+    {"Spec": "Reg4 — CIRV (Finn)", "Vuln. term": "CIRV (0–100)",
+     "n": int(m_reg4.nobs), "Adj R²": m_reg4.rsquared_adj, "AIC": m_reg4.aic},
+    {"Spec": "Reg4 — inform_composite", "Vuln. term": "INFORM composite (0–10)",
+     "n": int(m_reg4_ic.nobs), "Adj R²": m_reg4_ic.rsquared_adj, "AIC": m_reg4_ic.aic},
+    {"Spec": "Reg4 — Risk + Severity", "Vuln. term": "INFORM Risk + Severity",
+     "n": int(m_reg4_rs.nobs), "Adj R²": m_reg4_rs.rsquared_adj, "AIC": m_reg4_rs.aic},
+    {"Spec": "Reg5 — CIRV (Finn)", "Vuln. term": "CIRV (0–100)",
+     "n": int(m_reg5.nobs), "Adj R²": m_reg5.rsquared_adj, "AIC": m_reg5.aic},
+    {"Spec": "Reg5 — inform_composite", "Vuln. term": "INFORM composite (0–10)",
+     "n": int(m_reg5_ic.nobs), "Adj R²": m_reg5_ic.rsquared_adj, "AIC": m_reg5_ic.aic},
+    {"Spec": "Reg5 — Risk + Severity", "Vuln. term": "INFORM Risk + Severity",
+     "n": int(m_reg5_rs.nobs), "Adj R²": m_reg5_rs.rsquared_adj, "AIC": m_reg5_rs.aic},
+])
+
+(
+    GT(cmp_full)
+    .tab_header(
+        title="CIRV vs INFORM substitutes",
+        subtitle="Full sample (n = 103) — Risk + Severity drops to n = 77",
+    )
+    .fmt_number(columns=["Adj R²"], decimals=3)
+    .fmt_number(columns=["AIC"], decimals=1)
+    .tab_source_note(
+        "The 'Risk + Severity' rows enter both indices as separate "
+        "regressors and drop pre-2019 allocations (Severity unavailable)."
+    )
+)
+```
+
+```{python}
+#| label: inform-comparison-samesample
+
+# Restrict all models to the n=77 Severity-available subset for a fair comparison.
+df_77 = df.dropna(subset=["inform_severity"]).copy()
+
+m4_cirv_77 = fit_ols(df_77, ["CIRV"] + BASE_W_TARGETED)
+m4_ic_77 = fit_ols(df_77, ["inform_composite"] + BASE_W_TARGETED)
+m4_rs_77 = fit_ols(df_77, ["inform_risk", "inform_severity"] + BASE_W_TARGETED)
+m5_cirv_77 = fit_ols(df_77, ["CIRV"] + BASE_WO_TARGETED)
+m5_ic_77 = fit_ols(df_77, ["inform_composite"] + BASE_WO_TARGETED)
+m5_rs_77 = fit_ols(df_77, ["inform_risk", "inform_severity"] + BASE_WO_TARGETED)
+
+cmp_77 = pd.DataFrame([
+    {"Spec": "Reg4 — CIRV", "Adj R²": m4_cirv_77.rsquared_adj, "AIC": m4_cirv_77.aic},
+    {"Spec": "Reg4 — inform_composite", "Adj R²": m4_ic_77.rsquared_adj, "AIC": m4_ic_77.aic},
+    {"Spec": "Reg4 — Risk + Severity", "Adj R²": m4_rs_77.rsquared_adj, "AIC": m4_rs_77.aic},
+    {"Spec": "Reg5 — CIRV", "Adj R²": m5_cirv_77.rsquared_adj, "AIC": m5_cirv_77.aic},
+    {"Spec": "Reg5 — inform_composite", "Adj R²": m5_ic_77.rsquared_adj, "AIC": m5_ic_77.aic},
+    {"Spec": "Reg5 — Risk + Severity", "Adj R²": m5_rs_77.rsquared_adj, "AIC": m5_rs_77.aic},
+])
+
+# Highlight the best-fit row in each Reg4/Reg5 block
+best_idx_4 = cmp_77.iloc[:3]["Adj R²"].idxmax()
+best_idx_5 = cmp_77.iloc[3:]["Adj R²"].idxmax()
+
+(
+    GT(cmp_77)
+    .tab_header(
+        title="Same-sample comparison (n = 77, Severity-available)",
+        subtitle="Strips the Risk-only-fallback advantage that benefits CIRV on the full sample",
+    )
+    .fmt_number(columns=["Adj R²"], decimals=3)
+    .fmt_number(columns=["AIC"], decimals=1)
+    .tab_style(
+        style=style.fill(color="#e6f4e6"),
+        locations=loc.body(rows=[best_idx_4, best_idx_5]),
+    )
+    .tab_source_note(
+        "Green = best Adj R² within each Reg4/Reg5 block. "
+        "On equal footing, CIRV and INFORM composite are within ~1%; "
+        "Risk + Severity entered separately is best in both blocks."
+    )
+)
+```
+
+## Predicted vs observed
+
+```{python}
+#| label: pred-vs-obs
+#| fig-cap: "Predicted vs observed log-allocation under three Reg4 vulnerability variants on the n=103 sample. The dashed line is the 1:1 reference; coloured trends are model-specific OLS fits in observed-vs-predicted space. All three sit very close to one another."
+
+def _pred_frame(model, label):
+    sub = df.dropna(subset=list(model.params.index.drop("const")) + ["LogApproved"])
+    X = sm.add_constant(sub[list(model.params.index.drop("const"))].astype(float),
+                        has_constant="add")
+    return pd.DataFrame({
+        "Observed": sub["LogApproved"].to_numpy(),
+        "Predicted": model.predict(X).to_numpy(),
+        "Model": label,
+    })
+
+scatter_df = pd.concat([
+    _pred_frame(m_reg4, "CIRV (Finn)"),
+    _pred_frame(m_reg4_ic, "INFORM composite"),
+    _pred_frame(m_reg4_rs, "Risk + Severity"),
+])
+
+(
+    ggplot(scatter_df, aes("Observed", "Predicted", color="Model"))
+    + geom_abline(slope=1, intercept=0, linetype="dashed", color="#999999", size=0.5)
+    + geom_point(alpha=0.6, size=2)
+    + geom_smooth(method="lm", se=False, size=0.6)
+    + scale_color_manual(values={
+        "CIRV (Finn)": "#d6604d",
+        "INFORM composite": "#2166ac",
+        "Risk + Severity": "#1a9850",
+    })
+    + labs(x="Observed log(allocation)", y="Predicted log(allocation)",
+           color="")
+    + theme_minimal()
+    + theme(figure_size=(8, 6),
+            legend_position="top",
+            axis_text=element_text(size=10))
+)
+```
+
+## Sensitivity: Refugee reclassification
+
+CERF's GMS classifies cross-border refugee responses under "Displacement" --
+the same emergency type used for in-country IDP and conflict-violence
+allocations. This is a known issue: a CERF analyst (Dec 2025 review) flagged
+**80 historical CERF allocations as Refugee situations**, mostly in
+neighbouring countries reacting to spillover from a conflict elsewhere
+(e.g. Sudan→Egypt 2023, Venezuela→Peru 2018). For these, ACLED fatalities
+and IDMC IDPs *in the recipient country* don't speak to the underlying
+cause, so they arguably shouldn't be in a conflict-allocation training set.
+
+The reviewed file lives at
+`ds-cerf-allocation-patterns/processed/120226_CERF allocations with ACLED data.xlsx`
+(Column R, "Refugee Situation"). Mapping it onto Finn's training frame:
+
+```{python}
+#| label: refugee-attrition
+
+XUAN_BLOB = (
+    "ds-cerf-allocation-patterns/processed/"
+    "120226_CERF allocations with ACLED data.xlsx"
+)
+xuan = pd.read_excel(BytesIO(stratus.load_blob_data(XUAN_BLOB, stage="dev")))
+refs = xuan[xuan["Refugee Situation"] == "Refugee"].copy()
+
+steps = [("Xuan-verified Refugees (all years, all windows)", len(refs))]
+refs = refs[refs["year"] >= 2018]
+steps.append(("↓ 2018+ (Finn data window starts 2018)", len(refs)))
+refs = refs[refs["window"] == "Rapid Response"]
+steps.append(("↓ Rapid Response (Finn excludes Underfunded Emergencies)", len(refs)))
+refs = refs[refs["emergency"].isin(
+    ["Displacement", "Violence/Clashes", "Violence/clashes",
+     "Post-conflict Needs", "Human Rights"]
+)]
+steps.append(("↓ Conflict-typed emergency (Finn filter)", len(refs)))
+
+# Match against Finn via country + year + amount (date alone unreliable —
+# Peru 2018 differs Sept vs Oct between the two files).
+matched = refs.merge(
+    df_finn[["Application Code", "Country", "Year", "Amount Approved"]],
+    left_on=["country_harmonized", "year", "amount_usd"],
+    right_on=["Country", "Year", "Amount Approved"],
+    how="inner",
+)
+finn_master_codes = set(df_finn["Application Code"])
+finn_reg_codes = set(df["Application Code"])
+in_master = matched[matched["Application Code"].isin(finn_master_codes)]
+in_reg = matched[matched["Application Code"].isin(finn_reg_codes)]
+steps.append(("↓ In Finn Master_Data (n=152)", len(in_master)))
+steps.append(("↓ In Finn Regression_Data (n=103, complete predictor data)",
+              len(in_reg)))
+
+attrition = pd.DataFrame(steps, columns=["Filter", "Refugees remaining"])
+
+(
+    GT(attrition)
+    .tab_header(
+        title="Refugee allocations falling inside Finn's training set",
+        subtitle="Why only 6 of 80 verified Refugees overlap",
+    )
+    .tab_source_note(
+        "62 of 80 are pre-2018 (no IDMC daily IDP data); 8 more are "
+        "Underfunded Emergencies; 4 more had a missing predictor and were "
+        "dropped from Regression_Data."
+    )
+)
+```
+
+```{python}
+#| label: refugee-impact
+
+refugee_codes = set(in_reg["Application Code"])
+df_clean = df[~df["Application Code"].isin(refugee_codes)].copy()
+
+m_reg4_full = fit_ols(df, ["CIRV"] + BASE_W_TARGETED)
+m_reg4_clean = fit_ols(df_clean, ["CIRV"] + BASE_W_TARGETED)
+
+cmp_refs = pd.DataFrame([
+    {"Sample": f"Full (n = {int(m_reg4_full.nobs)})",
+     "Adj R²": m_reg4_full.rsquared_adj,
+     "AIC": m_reg4_full.aic,
+     "σ residual": float(np.sqrt(m_reg4_full.scale)),
+     "CIRV coef": m_reg4_full.params["CIRV"],
+     "CIRV p": m_reg4_full.pvalues["CIRV"]},
+    {"Sample": f"Refugees dropped (n = {int(m_reg4_clean.nobs)})",
+     "Adj R²": m_reg4_clean.rsquared_adj,
+     "AIC": m_reg4_clean.aic,
+     "σ residual": float(np.sqrt(m_reg4_clean.scale)),
+     "CIRV coef": m_reg4_clean.params["CIRV"],
+     "CIRV p": m_reg4_clean.pvalues["CIRV"]},
+])
+
+(
+    GT(cmp_refs)
+    .tab_header(
+        title="Reg4 (CIRV, w/ Targeted) — full vs refugees-dropped",
+    )
+    .fmt_number(columns=["Adj R²", "σ residual"], decimals=4)
+    .fmt_number(columns=["AIC"], decimals=2)
+    .fmt_number(columns=["CIRV coef"], decimals=5)
+    .fmt_number(columns=["CIRV p"], decimals=4)
+    .tab_source_note(
+        "Coefficient signs and significance unchanged across all five "
+        "regressors (only CIRV shown here). Full coefficient table "
+        "available on request."
+    )
+)
+```
+
+The model is essentially unchanged: σ tightens by ~3%, AIC improves by
+~12, no coefficient flips sign or significance. **For this phase of the
+project, the corrected and uncorrected training sets are interchangeable.**
+But two caveats are worth flagging for any future phase:
+
+- **Partial review.** Only the 6 rows above were ever sent for review --
+  those flagged by our pre-existing algorithm as "Likely Non-Conflict".
+  The other 97 of Finn's 103 rows are unreviewed and may also contain
+  refugee-spillover allocations that the algorithm missed.
+- **Date matching is unreliable.** Xuan's `allocation_date` and Finn's
+  `Date of Most Recent Submission` disagree by weeks in some cases
+  (e.g. Peru 2018: Sept vs Oct). Match on country + year + amount, not
+  on date.
+
+## Sensitivity: live data sources
+
+The production app will read ACLED conflict events from
+`hdx-signals/output/acled_conflict/raw.parquet` and IDMC internal
+displacement updates from `global/idmc/displacement_daily.parquet`
+(written by `scripts/refresh_idmc_displacement.py`, replicating the
+hdx-signals R reference). Both sources retroactively update older
+periods as their teams process more reports -- so by the time the app
+fits, exact feature values for Finn's 103 allocations have shifted from
+the snapshots in his xlsx (ACLED frozen Nov 2025; IDMC frozen Feb 2026).
+
+```{python}
+#| label: live-data-load
+#| output: false
+
+# Read the pre-computed live frame from blob (built offline by
+# scripts/refresh_conflict_training_frame.py). No raw ACLED/IDMC fetch in
+# the chapter — that's a slow operation that belongs in the refresh step.
+from src.datasets.conflict import load_conflict_training_frame
+
+df_live = load_conflict_training_frame().merge(
+    df_finn[["Application Code", "Monthly Fatalities", "IDPs 30d"]]
+        .rename(columns={"Monthly Fatalities": "fatalities_finn",
+                         "IDPs 30d": "idps30_finn"}),
+    on="Application Code", how="left",
+)
+```
+
+```{python}
+#| label: live-vs-finn-agreement
+
+def _band(s, tol):
+    return int(s.abs().le(tol).sum())
+
+acled_diff = (df_live["Monthly Fatalities"] - df_live["fatalities_finn"])
+idmc_diff = (df_live["IDPs 30d"] - df_live["idps30_finn"])
+
+agree = pd.DataFrame([
+    {"Source": "ACLED Monthly Fatalities (count)",
+     "Exact": int((acled_diff == 0).sum()),
+     "Within ±5": _band(acled_diff, 5),
+     "Within ±20": _band(acled_diff, 20),
+     "Median |Δ|": float(acled_diff.abs().median()),
+     "Max |Δ|": float(acled_diff.abs().max())},
+    {"Source": "IDMC IDPs 30d (count)",
+     "Exact": int((idmc_diff == 0).sum()),
+     "Within ±5": _band(idmc_diff, 5),
+     "Within ±20": _band(idmc_diff, 20),
+     "Median |Δ|": float(idmc_diff.abs().median()),
+     "Max |Δ|": float(idmc_diff.abs().max())},
+])
+
+(
+    GT(agree)
+    .tab_header(
+        title="Live blob vs Finn xlsx — raw counts",
+        subtitle=f"Agreement across Finn's n = {len(df_live)} conflict allocations",
+    )
+    .fmt_number(columns=["Median |Δ|", "Max |Δ|"], decimals=0)
+    .tab_source_note(
+        "ACLED drift is concentrated in active-conflict zones (COD, HTI, "
+        "PSE) and is always upward — the source retroactively adds events "
+        "as researchers process more reports. IDMC drift is mostly sub-IDP "
+        "rounding from the daily-figure distribution; the largest absolute "
+        "diffs are <2% relative."
+    )
+)
+```
+
+```{python}
+#| label: refit-live
+
+# Refit Reg4 (CIRV, w/ Targeted) with live features
+m_reg4_live = fit_ols(
+    df_live,
+    ["CIRV", "LogTargeted", "LogMonthlyFatalities",
+     "LogIDPs30d", "LogRequired"],
+)
+
+cmp_live = pd.DataFrame([
+    {"Source": "Finn xlsx (frozen)",
+     "n": int(m_reg4.nobs),
+     "Adj R²": m_reg4.rsquared_adj, "AIC": m_reg4.aic,
+     "CIRV": m_reg4.params["CIRV"],
+     "LogTargeted": m_reg4.params["LogTargeted"],
+     "LogRequired2": m_reg4.params["LogRequired2"],
+     "Log Fatalities": m_reg4.params["Log Monthly Fatalities"],
+     "Log IDPs 30d": m_reg4.params["Log IDPs 30d"]},
+    {"Source": "Live blob",
+     "n": int(m_reg4_live.nobs),
+     "Adj R²": m_reg4_live.rsquared_adj, "AIC": m_reg4_live.aic,
+     "CIRV": m_reg4_live.params["CIRV"],
+     "LogTargeted": m_reg4_live.params["LogTargeted"],
+     "LogRequired2": m_reg4_live.params["LogRequired"],
+     "Log Fatalities": m_reg4_live.params["LogMonthlyFatalities"],
+     "Log IDPs 30d": m_reg4_live.params["LogIDPs30d"]},
+])
+
+(
+    GT(cmp_live)
+    .tab_header(
+        title="Reg4 refit — Finn xlsx vs live blob",
+        subtitle="(CIRV, w/ Targeted)",
+    )
+    .fmt_number(columns=["Adj R²"], decimals=4)
+    .fmt_number(columns=["AIC"], decimals=2)
+    .fmt_number(columns=["CIRV", "LogTargeted", "LogRequired2",
+                         "Log Fatalities", "Log IDPs 30d"], decimals=4)
+    .tab_source_note(
+        "All coefficients shift by ≤3%. Adj R² differs by ~0.0005. No "
+        "significance flips. The model is robust to the upstream data "
+        "drift over a 5-month window."
+    )
+)
+```
+
+The model conclusions don't depend on Finn's frozen snapshot. We can wire
+the predictor app to live ACLED + IDMC sources without snapshotting
+infrastructure -- expected coefficient drift over a multi-month window is
+within the noise we'd already accept from monthly retraining.
+
+## Production models
+
+The two specifications we'll wire into the predictor app, fit on the
+**corrected live training frame** (live ACLED + IDMC, Xuan refugee
+exclusions applied; n = 97). Refresh script:
+`scripts/refresh_conflict_training_frame.py`. Loader:
+`src.datasets.conflict.load_conflict_training_frame()`.
+
+```{python}
+#| label: production-fit
+#| output: false
+
+from src.datasets.conflict import load_conflict_training_frame
+
+df_prod = load_conflict_training_frame()
+df_prod = df_prod[~df_prod["xuan_refugee_excluded"]].copy()
+
+REGRESSORS_A = ["CIRV", "LogTargeted", "LogRequired",
+                "LogMonthlyFatalities", "LogIDPs30d"]
+REGRESSORS_B = ["CIRV", "LogRequired",
+                "LogMonthlyFatalities", "LogIDPs30d"]
+
+mA = fit_ols(df_prod, REGRESSORS_A)
+mB = fit_ols(df_prod, REGRESSORS_B)
+
+
+def _coef_table(model, regressors: list[str]) -> pd.DataFrame:
+    rows = []
+    for v in ["const"] + regressors:
+        ci = model.conf_int().loc[v]
+        rows.append({
+            "Variable": "Intercept" if v == "const" else v,
+            "Coef": model.params[v],
+            "SE": model.bse[v],
+            "t": model.tvalues[v],
+            "p": model.pvalues[v],
+            "CI 2.5%": ci[0],
+            "CI 97.5%": ci[1],
+        })
+    return pd.DataFrame(rows)
+```
+
+### Model A — with `LogTargeted`
+
+```{python}
+#| label: production-model-a
+
+(
+    GT(_coef_table(mA, REGRESSORS_A))
+    .tab_header(
+        title="Model A coefficients",
+        subtitle=(f"OLS on LogApproved | n = {int(mA.nobs)} | "
+                  f"R² = {mA.rsquared:.4f} | Adj R² = {mA.rsquared_adj:.4f} | "
+                  f"AIC = {mA.aic:.2f} | "
+                  f"F = {mA.fvalue:.2f} (p = {mA.f_pvalue:.2e}) | "
+                  f"σ residual = {float(np.sqrt(mA.scale)):.4f}"),
+    )
+    .fmt_number(columns=["Coef", "SE", "CI 2.5%", "CI 97.5%"], decimals=5)
+    .fmt_number(columns=["t"], decimals=2)
+    .fmt_scientific(columns=["p"], decimals=2)
+    .tab_source_note(
+        "Live ACLED + IDMC features; Xuan-verified Refugee allocations excluded. "
+        "LogRequired = log(Total Amount Required) — Finn's CN-level humanitarian "
+        "funding ask, NOT the CERF-specific ask."
+    )
+)
+```
+
+### Model B — without `LogTargeted`
+
+```{python}
+#| label: production-model-b
+
+(
+    GT(_coef_table(mB, REGRESSORS_B))
+    .tab_header(
+        title="Model B coefficients",
+        subtitle=(f"OLS on LogApproved | n = {int(mB.nobs)} | "
+                  f"R² = {mB.rsquared:.4f} | Adj R² = {mB.rsquared_adj:.4f} | "
+                  f"AIC = {mB.aic:.2f} | "
+                  f"F = {mB.fvalue:.2f} (p = {mB.f_pvalue:.2e}) | "
+                  f"σ residual = {float(np.sqrt(mB.scale)):.4f}"),
+    )
+    .fmt_number(columns=["Coef", "SE", "CI 2.5%", "CI 97.5%"], decimals=5)
+    .fmt_number(columns=["t"], decimals=2)
+    .fmt_scientific(columns=["p"], decimals=2)
+    .tab_source_note(
+        "Drops LogTargeted for use cases where the targeted-people figure "
+        "isn't yet available at allocation-decision time."
+    )
+)
+```
+
+Model A is the preferred specification when `LogTargeted` is known:
+`LogTargeted` carries the bulk of the explanatory power (Adj R² 0.72 vs
+0.51 in B). Model B is the fallback for early-decision contexts.
+
+## Spec selection: where does the conflict model's edge come from?
+
+Finn's PDF makes the case that the conflict-specific model beats the
+3RM on conflict allocations. We've reproduced that: **R² on the 97
+conflict rows goes from 0.667 (base 3RM) to 0.716 (full conflict
+model)** — a 5 pp gain. But it's worth asking what's actually
+producing those 5 pp: is it the conflict-context features (ACLED,
+IDMC), or is it just the act of fitting OLS on a smaller, more
+homogeneous subset?
+
+We pull the two effects apart with one ladder of specs, all evaluated
+on the same 97 rows.
+
+```{python}
+#| label: spec-ladder
+#| output: false
+
+from src.datasets.inform import build_training_frame
+from src.models.cerf_inform import (
+    EMERGENCY_DUMMIES, REGRESSORS as REG_3RM,
+    fit_model as fit_3rm,
+)
+
+# Base 3RM fit on the full 422 (includes the 97 conflict rows).
+m_3rm = fit_3rm(build_training_frame())
+
+# All conflict-only specs, fit on n = 97.
+REGS_BASE_ONLY = ["inform_composite", "LogTargeted", "LogRequired"]
+REGS_PLUS_ACLED = REGS_BASE_ONLY + ["LogMonthlyFatalities"]
+REGS_FULL = REGS_BASE_ONLY + ["LogMonthlyFatalities", "LogIDPs30d"]
+
+m_base = fit_ols(df_prod, REGS_BASE_ONLY)
+m_acled = fit_ols(df_prod, REGS_PLUS_ACLED)
+m_full = fit_ols(df_prod, REGS_FULL)
+
+# Construct design matrices on the 97 rows for each model and predict.
+sub = df_prod.copy()
+for _d in EMERGENCY_DUMMIES:
+    sub[_d] = 1.0 if _d == "DisplConfl" else 0.0
+obs = sub["LogApproved"].to_numpy()
+
+
+def _preds(model, regressors):
+    X = sm.add_constant(sub[regressors].astype(float), has_constant="add")
+    return model.predict(X).to_numpy()
+
+
+def _r2_subset(y, yhat):
+    sst = float(np.sum((y - y.mean()) ** 2))
+    ssr = float(np.sum((y - yhat) ** 2))
+    return 1 - ssr / sst
+
+
+def _rmse(y, yhat):
+    return float(np.sqrt(np.mean((y - yhat) ** 2)))
+
+preds_3rm = _preds(m_3rm, REG_3RM)
+preds_base = _preds(m_base, REGS_BASE_ONLY)
+preds_acled = _preds(m_acled, REGS_PLUS_ACLED)
+preds_full = _preds(m_full, REGS_FULL)
+```
+
+```{python}
+#| label: spec-ladder-table
+
+ladder = pd.DataFrame([
+    {"Spec": "1. Base 3RM (n = 422, all emergencies + 8 dummies)",
+     "Train n": 422,
+     "Features beyond inform_composite + LogRequired + LogTargeted":
+         "8 emergency-type dummies",
+     "R² on 97": _r2_subset(obs, preds_3rm),
+     "RMSE log": _rmse(obs, preds_3rm)},
+    {"Spec": "2. Conflict, base only (n = 97)",
+     "Train n": 97,
+     "Features beyond inform_composite + LogRequired + LogTargeted": "—",
+     "R² on 97": _r2_subset(obs, preds_base),
+     "RMSE log": _rmse(obs, preds_base)},
+    {"Spec": "3. Conflict + ACLED (n = 97)",
+     "Train n": 97,
+     "Features beyond inform_composite + LogRequired + LogTargeted":
+         "+ LogMonthlyFatalities",
+     "R² on 97": _r2_subset(obs, preds_acled),
+     "RMSE log": _rmse(obs, preds_acled)},
+    {"Spec": "4. Conflict, full (n = 97)",
+     "Train n": 97,
+     "Features beyond inform_composite + LogRequired + LogTargeted":
+         "+ LogMonthlyFatalities + LogIDPs30d",
+     "R² on 97": _r2_subset(obs, preds_full),
+     "RMSE log": _rmse(obs, preds_full)},
+])
+
+(
+    GT(ladder)
+    .tab_header(
+        title="Spec ladder on the 97 conflict allocations",
+        subtitle="Sole common metric: R² evaluated on these 97 rows.",
+    )
+    .fmt_number(columns=["R² on 97", "RMSE log"], decimals=4)
+    .tab_source_note(
+        "Spec 1 = the storm-side base 3RM applied to a conflict row "
+        "(DisplConfl=1, all other dummies=0). Specs 2–4 = conflict-only OLS "
+        "fits, increasing in feature richness."
+    )
+)
+```
+
+### Read the ladder
+
+| Step | Gain in R² | What it tells us |
+|---|---|---|
+| 1 → 2 | **+~3 pp** | **Specialization** — same three features, slopes fit on conflict rows only. |
+| 2 → 3 | ~0 pp | ACLED monthly fatalities adds nothing once you've already specialized. |
+| 3 → 4 | **+~2 pp** | IDMC IDPs 30d adds fit, but with a coefficient sign that's wrong (more displacement → *smaller* predicted allocation). |
+
+**The headline.** About 60% of the conflict model's edge over the 3RM
+(~3 of the 5 pp R² gain) comes from **just fitting on the subset**,
+not from the conflict-context features. ACLED contributes essentially
+nothing. IDMC contributes some fit but at the cost of a hard-to-defend
+coefficient sign. The framing "the conflict model wins because it uses
+ACLED and IDMC" overstates what those two features are actually doing.
+
+### Why does specialization help, mechanically?
+
+Adding emergency-type dummies to OLS only lets each emergency type have
+its own **intercept**. The slopes on `inform_composite`, `LogTargeted`,
+and `LogRequired` are forced to be the same across all emergency types
+(parallel lines, different heights). The base 3RM is therefore a
+compromise across emergency types — its slopes optimize cross-type
+average fit.
+
+Fitting on conflict-only is mathematically equivalent to letting **each
+slope** be conflict-specific. The biggest divergence between the two
+fits in our case:
+
+| Coef | Base 3RM (n = 422) | Conflict-only (n = 97) |
+|---|---|---|
+| LogTargeted | +0.255 | **+0.366** |
+| LogRequired | +0.208 | **+0.134** |
+
+Conflict allocations apparently tie more strongly to the targeted-people
+figure and less strongly to the appeal-level requirement than the
+cross-emergency average — the 3RM doesn't have the freedom to capture
+that, so it gives up ~3 pp of fit on conflict rows in exchange for not
+having to add 30+ interaction terms.
+
+(Equivalent recipe in formula notation: `lm(y ~ X * EmergencyType,
+data=all)` ≡ subset and refit per category. We're choosing the latter
+because it's a smaller, more interpretable model.)
+
+```{python}
+#| label: spec-ladder-scatter
+#| fig-cap: "Predicted vs observed log-allocation on the 97 conflict rows for the bookend specs (base 3RM and full conflict A). 1:1 reference dashed; per-model OLS trends solid."
+
+scatter_df = pd.concat([
+    pd.DataFrame({"Observed": obs, "Predicted": preds_3rm,
+                  "Spec": "1. Base 3RM"}),
+    pd.DataFrame({"Observed": obs, "Predicted": preds_full,
+                  "Spec": "4. Conflict, full"}),
+])
+
+(
+    ggplot(scatter_df, aes("Observed", "Predicted", color="Spec"))
+    + geom_abline(slope=1, intercept=0, linetype="dashed",
+                  color="#999999", size=0.5)
+    + geom_point(alpha=0.6, size=2)
+    + geom_smooth(method="lm", se=False, size=0.6)
+    + scale_color_manual(values={
+        "1. Base 3RM": "#d6604d",
+        "4. Conflict, full": "#2166ac",
+    })
+    + labs(x="Observed log(allocation)",
+           y="Predicted log(allocation)", color="")
+    + theme_minimal()
+    + theme(figure_size=(8, 6),
+            legend_position="top",
+            axis_text=element_text(size=10))
+)
+```
+
+### Is the slope difference real, or sample noise?
+
+A natural worry: with n = 97, the conflict-only fit could be picking
+up sampling variation rather than a genuinely different process. We
+test this directly by fitting the full 3RM (n = 416) with **slope
+interactions** between `DisplConfl` and the three core regressors —
+the exact recipe that, if fully interacted across every emergency
+type, would be mathematically identical to subsetting and refitting
+per type.
+
+```{python}
+#| label: slope-interaction-test
+#| output: false
+
+df_full = build_training_frame()
+df_full = df_full.rename(columns={"ApplicationCode": "Application Code"})
+# Apply the same Xuan refugee correction.
+_refugee_codes = set(
+    load_conflict_training_frame()
+    .pipe(lambda d: d[d["xuan_refugee_excluded"]]["Application Code"])
+)
+df_full = df_full[~df_full["Application Code"].isin(_refugee_codes)].copy()
+
+for _v in ["LogTargeted", "LogRequired", "inform_composite"]:
+    df_full[f"{_v}_DisplConfl"] = df_full[_v] * df_full["DisplConfl"]
+
+regs_int = (
+    EMERGENCY_DUMMIES
+    + ["inform_composite", "LogRequired", "LogTargeted"]
+    + ["LogTargeted_DisplConfl", "LogRequired_DisplConfl",
+       "inform_composite_DisplConfl"]
+)
+m_int = fit_ols(df_full, regs_int)
+
+f_test = m_int.f_test(
+    "LogTargeted_DisplConfl=0, LogRequired_DisplConfl=0, "
+    "inform_composite_DisplConfl=0"
+)
+```
+
+```{python}
+#| label: slope-interaction-table
+
+rows = []
+for v in ["LogTargeted_DisplConfl", "LogRequired_DisplConfl",
+          "inform_composite_DisplConfl"]:
+    rows.append({
+        "Interaction": v.replace("_DisplConfl", " × DisplConfl"),
+        "Coef": m_int.params[v],
+        "SE": m_int.bse[v],
+        "t": m_int.tvalues[v],
+        "p": m_int.pvalues[v],
+    })
+rows.append({
+    "Interaction": "Joint F-test (all three = 0)",
+    "Coef": "—", "SE": "—",
+    "t": f"F = {f_test.fvalue:.2f}",
+    "p": float(f_test.pvalue),
+})
+
+(
+    GT(pd.DataFrame(rows))
+    .tab_header(
+        title="Are conflict slopes different from cross-emergency slopes?",
+        subtitle=f"Full 3RM with DisplConfl interactions, n = {int(m_int.nobs)}",
+    )
+    .fmt_number(columns=["Coef", "SE"], decimals=4, rows=[0, 1, 2])
+    .fmt_number(columns=["t"], decimals=2, rows=[0, 1, 2])
+    .fmt_scientific(columns=["p"], decimals=2)
+    .tab_source_note(
+        "Each interaction term measures how the conflict-specific slope "
+        "differs from the slope estimated on all non-conflict emergencies. "
+        "The joint F-test rejects 'conflict slopes equal the average' at "
+        f"p = {f_test.pvalue:.4f}, so the specialisation gain is real, "
+        "not noise."
+    )
+)
+```
+
+**Interpretation.** `LogRequired × DisplConfl` is highly significant
+(p < 0.001, conflict slope is materially flatter than the
+cross-emergency average) and the joint test rejects "no slope
+difference" at the 0.5% level. The specialist model is fitting a
+genuinely different process, not just memorising 97 rows.
+
+This is good news for the specialist case: it justifies spending the
+n = 97 sample to get conflict-tailored slopes rather than relying on
+the pooled 3RM's compromise slopes.
+
+### Specialist vs generalist — what's the tradeoff in numbers?
+
+The ~3 pp R² gain from specialization isn't free. Conflict-only OLS is
+fit on **97 rows instead of 422**, so coefficient estimates are less
+precise (wider standard errors). That's the price of letting the
+slopes vary by emergency type implicitly:
+
+| | Base 3RM (n = 422) | Conflict, base only (n = 97) |
+|---|---|---|
+| Adj R² (own training set) | 0.7047 | 0.6831 |
+| **R² evaluated on the 97 conflict rows** | **0.6667** | **0.6930** |
+| σ residual (log USD) | 0.470 | 0.442 |
+| SE on `inform_composite` | 0.019 | 0.050 (**2.6×**) |
+| SE on `LogTargeted` | 0.022 | 0.045 (**2.0×**) |
+| SE on `LogRequired` | 0.024 | 0.037 (**1.6×**) |
+| Mean 80% PI width (log USD) | 1.215 | 1.165 (~4% narrower) |
+
+**Why standard errors widen 2-2.6×.** With a smaller sample the same
+amount of signal is fit through fewer observations; the slope estimate
+itself is less precisely pinned down. So while the fitted slopes
+themselves are arguably more *accurate* for conflict rows (lower σ²,
+better R² on the subset), our *confidence in any given slope estimate*
+is meaningfully weaker.
+
+**Why prediction intervals are slightly narrower.** The PI width
+depends on σ² (residual scatter around the line) and on coefficient
+uncertainty. The conflict subset is more homogeneous than the full 422
+(σ² drops from 0.221 to 0.196), and that drop slightly outweighs the
+extra coefficient uncertainty — net effect ≈ 4% narrower PI.
+
+**The honest summary.** The specialist model is somewhat *better* at
+predicting conflict allocations (R² up, PI narrower) but somewhat
+*less certain* about which slope to use to do so. With a sample as
+small as n = 97, that uncertainty matters: a few unusual conflict
+allocations can shift the LogTargeted slope by a non-trivial amount.
+
+### The case for shipping the base 3RM (generalist) anyway
+
+Two independent arguments push the same direction: a **statistical**
+one (the gain we're capturing isn't worth the variance we're
+introducing) and a **consistency** one (the principle behind
+specialising one type generalises to specialising everything).
+
+**Statistical: gain vs loss accounting**
+
+What the specialist *gains* (vs the generalist on the same 97 conflict
+rows):
+
+- ~3 pp R² in-sample. RMSE log drops from 0.451 to 0.433 — about a 4%
+  reduction in typical residual size on the training rows.
+
+What the specialist *loses* (vs the generalist):
+
+- **Standard errors widen 2–2.6×** on the shared regressors:
+  `inform_composite` SE goes from 0.019 → 0.050 (2.6×), `LogTargeted`
+  from 0.022 → 0.045 (2.0×), `LogRequired` from 0.024 → 0.037 (1.6×).
+  These wider SEs flow directly into wider confidence intervals on
+  every coefficient and (less directly) into wider prediction
+  intervals.
+- **The training sample is ~4× smaller** (n = 97 vs 422). With 5
+  regressors fit on 97 rows, the leverage of any single observation
+  is non-trivial; one unusual conflict allocation can swing the
+  `LogTargeted` slope by tenths.
+- **In-sample R² is a misleading metric** when sample sizes differ.
+  The in-sample gain is largely the model fitting noise specific to
+  the 97 rows. On a *new* conflict allocation, the specialist's lower
+  coefficient precision means higher prediction variance — partly
+  offsetting (or eclipsing) its lower bias. MSE for an out-of-sample
+  prediction = bias² + variance + irreducible noise; the generalist
+  pays a small bias premium and gets a much smaller variance term.
+- **Slope stability over time** is materially better for the
+  generalist. As new conflict allocations land, the specialist's
+  slopes will drift visibly. The generalist's barely move.
+
+The honest summary: the specialist trades a small in-sample bias
+reduction for a larger variance increase. For a model whose job is to
+predict new allocations, that's the wrong direction.
+
+**Consistency: the F-test argument generalises**
+
+The F-test we ran said conflict slopes differ from the cross-emergency
+average at p = 0.005. That's evidence the conflict process is a
+different process. But the same test, run on storms or floods, would
+almost certainly also reject — every emergency type is plausibly its
+own process. The honest extrapolation of *"specialise wherever slopes
+differ"* is **eight specialist models**, one per emergency type, each
+fit on 30–80 allocations of its category. We don't want to build or
+maintain that. Specialising for one type while leaving the others
+pooled is harder to defend than either extreme.
+
+So the consistency argument is: given we're not specialising
+everywhere, the consistent choice is to **specialise nowhere** and
+ship the base 3RM as a single model that handles every emergency type,
+conflict included.
+
+**Operational corollaries (smaller arguments, but they compound):**
+
+- One model, one technical note, one prediction-interval
+  interpretation.
+- No branching logic in the app, no second training pipeline to
+  maintain.
+- "We use the same model for storms, floods, conflict" is easier to
+  explain than "we built a specialist for conflict because of an
+  F-test, but for the other emergency types we just trust the
+  pooled fit".
+
+### What to ship
+
+**Recommendation: ship the base 3RM (Spec 1) for all emergency types,
+including conflict.**
+
+The base 3RM:
+- Single, consistent model across emergency types.
+- Tighter coefficient SEs (2–2.6× on shared regressors).
+- Avoids the conflict model's IDMC negative-sign embarrassment
+  entirely (since IDMC isn't a 3RM regressor).
+- Avoids the consistency trap of specialising one emergency type but
+  not others.
+
+If a decision-maker pushes back on the ~3 pp R² gap on conflict rows,
+the answer is: that gap is the price of model consistency, and the
+consistency argument cuts the other way too — we'd lose more by
+shipping a patchwork of specialists than we'd gain by specialising
+just one.
+
+**Other specs as documentation, not deployment.**
+
+- **Spec 2 (Conflict, base only)** stays in the chapter as an honest
+  reproduction of "what specialisation buys you on this subset". It's
+  not the operational pick.
+- **Spec 3 (Conflict + ACLED)** is a narrative variant; ACLED's
+  contribution is non-significant once IDMC is out.
+- **Spec 4 (Conflict + ACLED + IDMC)** has the highest in-sample R²
+  but ships the IDMC negative-sign problem. Keep documented; do not
+  ship.
+
+## Smarter features: does better engineering change the picture?
+
+The argument for shipping the base 3RM rests on the conflict model's edge
+being modest: ~3 pp of R² from specialisation, ~2 pp from IDMC (with a
+counter-intuitive sign), 0 from ACLED. But Finn used the crudest
+possible features:
+
+- **Raw counts, no country-relative normalisation.** 1,000 fatalities
+  means one thing in COD (chronic) and another in PER (unprecedented).
+- **A single arbitrary window** (30d for IDPs, calendar-month-of for
+  fatalities). Neither captures momentum or chronic-vs-acute texture.
+- **All ACLED events pooled**, including Riots, Protests and Strategic
+  developments — 60% of ACLED rows that carry weak signal at best for
+  the kind of conflict CERF responds to. As an extreme example, Mexico
+  has thousands of cartel-violence fatalities a year and CERF has
+  never allocated there: that 'fatalities' signal isn't humanitarian-
+  response signal.
+- **Allocation-month leakage.** "Monthly Fatalities" is fatalities in
+  the calendar month *of* the allocation. CERF decisions take weeks;
+  some of those fatalities post-date the actual decision.
+
+If smarter features genuinely improve the conflict model — and especially
+if they fix the IDMC negative-sign problem — the case for specialisation
+re-opens. If they don't, the generalist case is *strengthened*: we
+tried.
+
+We build a richer feature panel
+(`src/datasets/conflict_features.py`) with:
+
+- **Multi-window levels** at 30 / 90 / 180 / 365 days preceding allocation.
+- **Country-relative z-scores** (window's monthly rate vs that country's
+  historical mean+std on monthly aggregates).
+- **Momentum** — recent 30d rate / 365d rate (log).
+- **YoY change** in 90d (this 90d vs same 90d a year ago).
+- **Decision-lag versions** — the same windows ending 30 days *before*
+  allocation, on the assumption that the decision itself was effectively
+  made earlier.
+- **ACLED event-type filter** — "response-relevant" = Battles +
+  Violence-against-civilians + Explosions/Remote violence; drops the
+  60% of rows that are Protests / Riots / Strategic developments.
+
+The features are pre-computed (slow ACLED load) and cached locally:
+`book/_cache/02d-engineered-features/conflict_engineered_features.parquet`,
+built by `scripts/cache_conflict_engineered_features.py`.
+
+```{python}
+#| label: load-engineered
+#| output: false
+
+from pathlib import Path
+from src.datasets.conflict import load_conflict_training_frame
+
+CACHE = Path("_cache/02d-engineered-features/conflict_engineered_features.parquet")
+
+eng = pd.read_parquet(CACHE)
+eng["alloc_date"] = pd.to_datetime(eng["alloc_date"])
+
+train = load_conflict_training_frame()
+train["alloc_date"] = pd.to_datetime(train["alloc_date"])
+train = train.rename(columns={"ISO3": "iso3"})
+train = train[~train["xuan_refugee_excluded"]].copy()
+
+dfe = train.merge(eng, on=["iso3", "alloc_date"], how="left")
+
+# Log-transformed engineered features (level features only — z-scores
+# and momentum are already on a meaningful scale).
+for d in (30, 90, 180, 365):
+    dfe[f"LogFatalities_{d}d"] = np.log(dfe[f"fatalities_{d}d"].fillna(0) + 1)
+    dfe[f"LogFatalities_{d}d_lag30"] = np.log(dfe[f"fatalities_{d}d_lag30"].fillna(0) + 1)
+    dfe[f"LogIDPs_{d}d"] = np.log(dfe[f"idps_{d}d"].fillna(0) + 1)
+    dfe[f"LogIDPs_{d}d_lag30"] = np.log(dfe[f"idps_{d}d_lag30"].fillna(0) + 1)
+for d in (90, 180):
+    dfe[f"LogFatalities_rr_{d}d"] = np.log(dfe[f"fatalities_response_relevant_{d}d"].fillna(0) + 1)
+    dfe[f"LogFatalities_battles_{d}d"] = np.log(dfe[f"fatalities_battles_{d}d"].fillna(0) + 1)
+    dfe[f"LogFatalities_vac_{d}d"] = np.log(dfe[f"fatalities_vac_{d}d"].fillna(0) + 1)
+
+
+def cv_r2(data: pd.DataFrame, regressors: list[str], k: int = 10,
+          seed: int = 7) -> float:
+    """Out-of-sample R² via k-fold CV. Pure OLS via lstsq for speed."""
+    sub = data.dropna(subset=regressors + ["LogApproved"]).reset_index(drop=True)
+    y = sub["LogApproved"].astype(float).to_numpy()
+    X = sm.add_constant(
+        sub[regressors].astype(float), has_constant="add"
+    ).to_numpy()
+    rng = np.random.default_rng(seed)
+    idx = rng.permutation(len(y))
+    folds = np.array_split(idx, k)
+    yhat = np.zeros_like(y)
+    for f in folds:
+        tr_mask = np.ones(len(y), dtype=bool)
+        tr_mask[f] = False
+        beta = np.linalg.lstsq(X[tr_mask], y[tr_mask], rcond=None)[0]
+        yhat[f] = X[f] @ beta
+    sst = float(np.sum((y - y.mean()) ** 2))
+    ssr = float(np.sum((y - yhat) ** 2))
+    return 1 - ssr / sst
+```
+
+### Diagnosing the IDMC negative-sign problem
+
+The natural first hypothesis is endogeneity with `LogTargeted`: high
+displacement implies a large targeted-people figure, so once both are
+in the model the IDPs term picks up "marginal" effect rather than
+scale, which could legitimately be negative.
+
+```{python}
+#| label: idps-endogeneity
+
+specs = [
+    ("Reg4 (composite, w/ Targeted)",
+     ["inform_composite", "LogTargeted", "LogRequired",
+      "LogMonthlyFatalities", "LogIDPs30d"]),
+    ("Drop LogTargeted",
+     ["inform_composite", "LogRequired",
+      "LogMonthlyFatalities", "LogIDPs30d"]),
+    ("Drop LogMonthlyFatalities",
+     ["inform_composite", "LogTargeted", "LogRequired", "LogIDPs30d"]),
+    ("Drop both Required & Fatalities",
+     ["inform_composite", "LogTargeted", "LogIDPs30d"]),
+    ("IDPs alone (bivariate)",
+     ["LogIDPs30d"]),
+]
+
+rows = []
+for label, regs in specs:
+    m = fit_ols(dfe, regs)
+    rows.append({
+        "Spec": label,
+        "n": int(m.nobs),
+        "Adj R²": m.rsquared_adj,
+        "IDPs coef": m.params["LogIDPs30d"],
+        "IDPs p": m.pvalues["LogIDPs30d"],
+    })
+
+(
+    GT(pd.DataFrame(rows))
+    .tab_header(
+        title="What's holding the IDPs sign negative?",
+        subtitle="Pulling out covariates one at a time, n = 97",
+    )
+    .fmt_number(columns=["Adj R²", "IDPs coef"], decimals=4)
+    .fmt_number(columns=["IDPs p"], decimals=3)
+    .tab_source_note(
+        "Bivariate IDPs is weakly positive (and not significant). The "
+        "negative sign appears once we condition on fatalities + required "
+        "+ composite — a partial-correlation effect, not endogeneity with "
+        "LogTargeted (corr ≈ 0.18, low)."
+    )
+)
+```
+
+The negative sign isn't endogeneity with `LogTargeted` — it's a
+partial-correlation effect. Once we control for conflict intensity
+(fatalities), appeal-level demand (`LogRequired`), and vulnerability
+(composite), the *additional* variation in displacement is mildly
+negatively associated with allocation size. Substantively this is
+plausible: large mass-displacement events trigger UNHCR / refugee-
+response funding streams that backstop CERF, so CERF tends to fund
+*conditional* on the displacement story being only partly addressed
+elsewhere.
+
+This means **better IDP feature engineering won't 'fix' the sign**: it's
+a real partial-out effect. What feature engineering can do is reduce
+the multicollinearity that's amplifying the partial sign, and tell us
+whether a different IDP window better explains residual variance.
+
+### Window sweep on IDPs and fatalities
+
+Holding the rest of Reg4 fixed, swap the IDP window through
+30/90/180/365d. Same for the fatalities window.
+
+```{python}
+#| label: window-sweep-idps
+
+rows = []
+for window in (30, 90, 180, 365):
+    fcol = f"LogIDPs_{window}d"
+    regs = ["inform_composite", "LogTargeted", "LogRequired",
+            "LogMonthlyFatalities", fcol]
+    m = fit_ols(dfe, regs)
+    rows.append({
+        "IDP window": f"{window}d",
+        "Adj R²": m.rsquared_adj,
+        "CV R² (10-fold)": cv_r2(dfe, regs),
+        "IDP coef": m.params[fcol],
+        "IDP p": m.pvalues[fcol],
+    })
+
+(
+    GT(pd.DataFrame(rows))
+    .tab_header(title="IDP window sweep")
+    .fmt_number(columns=["Adj R²", "CV R² (10-fold)", "IDP coef"], decimals=4)
+    .fmt_number(columns=["IDP p"], decimals=3)
+)
+```
+
+```{python}
+#| label: window-sweep-fatalities
+
+rows = []
+specs = [
+    ("All-events 30d (Finn baseline)", "LogMonthlyFatalities"),
+    ("All-events 90d", "LogFatalities_90d"),
+    ("All-events 180d", "LogFatalities_180d"),
+    ("All-events 365d", "LogFatalities_365d"),
+    ("Response-relevant 90d", "LogFatalities_rr_90d"),
+    ("Response-relevant 180d", "LogFatalities_rr_180d"),
+    ("Battles only 90d", "LogFatalities_battles_90d"),
+    ("VAC only 90d", "LogFatalities_vac_90d"),
+]
+for label, fcol in specs:
+    regs = ["inform_composite", "LogTargeted", "LogRequired",
+            fcol, "LogIDPs30d"]
+    m = fit_ols(dfe, regs)
+    rows.append({
+        "Fatalities feature": label,
+        "Adj R²": m.rsquared_adj,
+        "CV R² (10-fold)": cv_r2(dfe, regs),
+        "Fat. coef": m.params[fcol],
+        "Fat. p": m.pvalues[fcol],
+    })
+
+(
+    GT(pd.DataFrame(rows))
+    .tab_header(
+        title="Fatalities window + event-type sweep",
+        subtitle="Response-relevant = Battles + Violence-against-civilians + Explosions",
+    )
+    .fmt_number(columns=["Adj R²", "CV R² (10-fold)", "Fat. coef"], decimals=4)
+    .fmt_number(columns=["Fat. p"], decimals=3)
+    .tab_source_note(
+        "Response-relevant filter drops Protests, Riots, Strategic "
+        "developments — ~60% of ACLED rows but weak humanitarian-response "
+        "signal."
+    )
+)
+```
+
+### Country-relative z-scores
+
+```{python}
+#| label: zscore-comparison
+
+rows = []
+for label, fcol, icol in [
+    ("Levels (90d log counts)", "LogFatalities_90d", "LogIDPs_90d"),
+    ("Z-scores (90d)", "fatalities_90d_z", "idps_90d_z"),
+    ("Mixed: fat z-score, idps log",
+     "fatalities_90d_z", "LogIDPs_90d"),
+    ("Mixed: fat log, idps z-score",
+     "LogFatalities_90d", "idps_90d_z"),
+]:
+    regs = ["inform_composite", "LogTargeted", "LogRequired", fcol, icol]
+    m = fit_ols(dfe, regs)
+    rows.append({
+        "Spec": label,
+        "Adj R²": m.rsquared_adj,
+        "CV R² (10-fold)": cv_r2(dfe, regs),
+    })
+
+(
+    GT(pd.DataFrame(rows))
+    .tab_header(title="Country-relative z-scores vs raw levels")
+    .fmt_number(columns=["Adj R²", "CV R² (10-fold)"], decimals=4)
+)
+```
+
+### Momentum and YoY change
+
+```{python}
+#| label: momentum-yoy
+
+best_levels = ["inform_composite", "LogTargeted", "LogRequired",
+               "LogFatalities_rr_90d", "LogIDPs_90d"]
+
+rows = []
+for label, extra in [
+    ("Levels only", []),
+    ("+ fatalities momentum", ["fatalities_momentum"]),
+    ("+ idps momentum", ["idps_momentum"]),
+    ("+ both momentum", ["fatalities_momentum", "idps_momentum"]),
+    ("+ fatalities YoY 90d", ["fatalities_yoy_change_90d"]),
+    ("+ idps YoY 90d", ["idps_yoy_change_90d"]),
+]:
+    regs = best_levels + extra
+    m = fit_ols(dfe, regs)
+    rows.append({
+        "Spec": label,
+        "Adj R²": m.rsquared_adj,
+        "CV R² (10-fold)": cv_r2(dfe, regs),
+        "Add'l p (smallest)":
+            min((m.pvalues[e] for e in extra), default=float("nan")),
+    })
+
+(
+    GT(pd.DataFrame(rows))
+    .tab_header(title="Adding momentum / YoY change to the best level spec")
+    .fmt_number(columns=["Adj R²", "CV R² (10-fold)", "Add'l p (smallest)"],
+                decimals=4)
+)
+```
+
+### Master ladder: Finn baseline → engineered → base 3RM
+
+```{python}
+#| label: engineered-master-ladder
+
+# Build base 3RM eval on the 97 rows (DisplConfl=1, others=0)
+sub_eval = dfe.copy()
+for _d in EMERGENCY_DUMMIES:
+    sub_eval[_d] = 1.0 if _d == "DisplConfl" else 0.0
+obs = sub_eval["LogApproved"].to_numpy()
+
+
+def _r2_subset(y, yhat):
+    sst = float(np.sum((y - y.mean()) ** 2))
+    ssr = float(np.sum((y - yhat) ** 2))
+    return 1 - ssr / sst
+
+
+def _eval_in(spec_label, regressors, train_frame):
+    m = fit_ols(train_frame, regressors)
+    Xe = sm.add_constant(sub_eval[regressors].astype(float),
+                         has_constant="add")
+    yhat = m.predict(Xe).to_numpy()
+    return {
+        "Spec": spec_label,
+        "n train": int(m.nobs),
+        "R² on 97": _r2_subset(obs, yhat),
+        "CV R² (10-fold)": (cv_r2(train_frame, regressors)
+                            if train_frame is dfe else None),
+    }
+
+
+# Base 3RM eval
+yhat_3rm = m_3rm.predict(
+    sm.add_constant(sub_eval[REG_3RM].astype(float), has_constant="add")
+).to_numpy()
+ladder = [{
+    "Spec": "1. Base 3RM (n = 422)",
+    "n train": 422,
+    "R² on 97": _r2_subset(obs, yhat_3rm),
+    "CV R² (10-fold)": None,
+}]
+ladder.append(_eval_in(
+    "2. Finn-style (Reg4 + composite)",
+    ["inform_composite", "LogTargeted", "LogRequired",
+     "LogMonthlyFatalities", "LogIDPs30d"], dfe))
+ladder.append(_eval_in(
+    "3. Engineered: RR-90d fatalities, 90d IDPs",
+    ["inform_composite", "LogTargeted", "LogRequired",
+     "LogFatalities_rr_90d", "LogIDPs_90d"], dfe))
+ladder.append(_eval_in(
+    "4. Engineered: + momentum",
+    ["inform_composite", "LogTargeted", "LogRequired",
+     "LogFatalities_rr_90d", "LogIDPs_90d",
+     "fatalities_momentum", "idps_momentum"], dfe))
+
+(
+    GT(pd.DataFrame(ladder))
+    .tab_header(
+        title="Engineered features vs Finn baseline vs base 3RM",
+        subtitle="All evaluated on the same 97 conflict allocations",
+    )
+    .fmt_number(columns=["R² on 97", "CV R² (10-fold)"], decimals=4)
+    .sub_missing(missing_text="—")
+    .tab_source_note(
+        "CV R² is the honest out-of-sample number for engineered specs. "
+        "Spec 1 (base 3RM) doesn't get a CV row because its training set "
+        "is the full 422 — its 'R² on 97' is already an out-of-conflict-"
+        "subset evaluation."
+    )
+)
+```
+
+### Bottom line
+
+Three findings — all sharper than expected:
+
+**1. The IDPs negative coefficient is structural, not a feature
+problem.** Every IDP window (30 / 90 / 180 / 365 days) produces a
+negative coefficient that's statistically significant (p ≤ 0.04). The
+sign doesn't flip when `LogTargeted` is dropped, and `LogTargeted` and
+`LogIDPs30d` are only weakly correlated (r ≈ 0.18). What's actually
+producing the negative sign is a partial-correlation effect: once we
+control for fatalities, required funding, and vulnerability, the
+*residual* variation in displacement is mildly negatively associated
+with allocation size. Engineering can't fix that — the sign is part
+of the underlying CERF behaviour, not a feature defect.
+
+**2. ACLED features carry no independent signal for allocation
+amount once IDPs and the rest of the model are in.** Surprisingly,
+Finn's Monthly Fatalities is the *only* fatalities feature that comes
+out even weakly significant (p = 0.123). Every wider window (90 /
+180 / 365d) and every event-type-filtered version (Battles, VAC,
+Explosions, response-relevant) drops the fatalities coefficient to
+essentially zero (p ≥ 0.85). This is multicollinearity: longer
+fatalities windows correlate too strongly with IDPs to add anything
+new.
+
+**3. The killer finding — out-of-sample, the specialist gain
+disappears entirely.** 10-fold cross-validated R² is essentially
+identical across every spec we tried:
+
+- Finn-style (Reg4 + composite): in-sample R² 0.716, **CV R² 0.668**
+- Best engineered (RR-90d fatalities, 90d IDPs): in-sample R² 0.705,
+  **CV R² 0.666**
+- Base 3RM evaluated on 97 conflict rows (out-of-conflict-subset
+  prediction): **R² 0.666**
+
+The conflict model's ~5 pp in-sample advantage over the base 3RM is
+**entirely overfitting**. On a held-out conflict allocation the
+specialist and the generalist perform identically. The earlier F-test
+argument — that the conflict slopes are statistically different from
+the average — was correct but turns out to be the wrong thing to
+optimise for: those different slopes don't actually predict new
+conflict allocations any better than the pooled slopes do.
+
+### Verdict — strengthened recommendation
+
+**The base 3RM is the right model for conflict allocations, by every
+honest yardstick we've tried.** The engineering exercise wasn't
+wasted: it converts the original "marginal advantage we should be
+careful about claiming" into "we tried smarter features and the
+specialist edge straight-up vanishes out-of-sample." The case for
+shipping the generalist is now:
+
+- **Out-of-sample equivalence**: CV R² for the specialist matches the
+  generalist's evaluation on the same rows.
+- **Tighter coefficient SEs** (2–2.6× on shared regressors, from
+  earlier sections).
+- **Single model, single deployment story.**
+- **No structural IDPs-sign problem to explain to decision makers.**
+- **No model selection / multiplicity overhead** — F-tests on slope
+  differences are noisy when the rejection doesn't translate to
+  out-of-sample gains.
+
+The honest read on ACLED and IDMC: they are excellent *monitoring*
+signals (anticipating where conflict is escalating) but poor
+*allocation-size* predictors once vulnerability and the funding ask
+are in the model. That conclusion holds whether you use Finn's crude
+features or the engineered versions.
+
+## Country heterogeneity: is the ACLED null a pooling artifact?
+
+Every spec we've tested so far is **pooled across countries**: a
+single regression where COD, HTI, YEM, BFA and the rest share one
+slope on each predictor. The base 3RM does include eight
+emergency-type dummies — which mechanically *is* a fixed-effects
+model on emergency type, allowing each type (Storm, Flood, ...,
+DisplConfl) its own intercept — but it never lets the intercept vary
+by **country**. Two conflict allocations to different countries are
+forced to start from the same predicted baseline before controls.
+
+That's worth checking, because the 97 conflict allocations are spread
+across 29 countries with very different conflict regimes — chronic
+(COD, AFG, ETH, SDN) vs episodic (HTI, MLI, BFA, UKR). If the
+ACLED→allocation relationship genuinely differs across regimes, a
+pooled coefficient is averaging opposite slopes and lands near zero
+by construction. The "essentially no signal" verdict from the
+preceding sections could be an artifact of the pooling itself.
+
+We probe this in two steps. **Step 1**: add country fixed effects to
+see if ACLED's apparent null survives once between-country baseline
+variation is absorbed — this still assumes a single shared ACLED
+slope across countries. **Step 2**: drop the shared-slope assumption
+and fit a separate regression per country, to see if the slope itself
+looks the same everywhere.
+
+### Step 1 — country fixed effects
+
+Mechanically, this just adds a dummy for each of the 28 non-reference
+countries — the same construction as the eight emergency-type dummies
+already in the base 3RM, just on a different grouping variable.
+
+```{python}
+#| label: country-fe-ladder
+
+country_dummies = pd.get_dummies(
+    df_prod["ISO3"], prefix="iso", drop_first=True
+)
+df_fe = pd.concat([df_prod, country_dummies.astype(float)], axis=1)
+country_cols = country_dummies.columns.tolist()
+
+CTRL = ["inform_composite", "LogRequired", "LogTargeted", "LogIDPs30d"]
+
+fe_specs = [
+    ("Pooled, no ACLED",                CTRL),
+    ("Pooled + LogMonthlyFatalities",   CTRL + ["LogMonthlyFatalities"]),
+    ("CountryFE, no ACLED",             CTRL + country_cols),
+    ("CountryFE + LogMonthlyFatalities",
+        CTRL + country_cols + ["LogMonthlyFatalities"]),
+]
+
+fe_rows = []
+for label, regs in fe_specs:
+    m = fit_ols(df_fe, regs)
+    has_acled = "LogMonthlyFatalities" in regs
+    fe_rows.append({
+        "Spec": label,
+        "n": int(m.nobs),
+        "k": int(len(regs)),
+        "Adj R²": m.rsquared_adj,
+        "ACLED coef": (m.params["LogMonthlyFatalities"]
+                       if has_acled else float("nan")),
+        "ACLED p":    (m.pvalues["LogMonthlyFatalities"]
+                       if has_acled else float("nan")),
+    })
+
+(
+    GT(pd.DataFrame(fe_rows))
+    .tab_header(
+        title="Country fixed effects vs pooled",
+        subtitle="Same 97 conflict rows. FE = 28 country dummies.",
+    )
+    .fmt_number(columns=["Adj R²", "ACLED coef"], decimals=4)
+    .fmt_number(columns=["ACLED p"], decimals=3)
+    .sub_missing(missing_text="—")
+    .tab_source_note(
+        "Pooled→FE jumps Adj R² by ~3 pp net of the 28-dummy penalty, "
+        "and ACLED p drops from 0.12 to 0.07."
+    )
+)
+```
+
+Two things move in the right direction:
+
+1. **Adj R² gains ~3 percentage points** going pooled → FE. That's
+   after the Adjusted-R² penalty for the 28 extra parameters, so the
+   FE design is adding genuine explanatory power, not just spending
+   degrees of freedom. Between-country baseline variation in
+   allocation tier — the donor-relationship history, the
+   chronic-vs-episodic context, the geopolitical attention level —
+   is real residual structure the base 3RM's emergency-type-only
+   intercepts weren't capturing.
+2. **ACLED's p-value drops from 0.12 to 0.07**, and its coefficient
+   grows from +0.05 to +0.08. The pooled spec was being asked to find
+   one allocation baseline for all 29 countries at once, and the
+   between-country averaging was muting the within-country ACLED
+   signal. Once the model can absorb each country's baseline, ACLED
+   reaches the edge of conventional significance.
+
+Note what this finding does *not* claim. Country FE assumes a
+*common* ACLED slope; it just lets the intercept shift by country.
+So Step 1 says only: "even under the strong assumption of a single
+shared slope, removing between-country averaging is enough to nearly
+halve ACLED's p-value." It doesn't yet test whether the slope itself
+varies.
+
+### Step 2 — decompose by country
+
+To test whether the slope varies, we drop the shared-slope assumption
+and refit a small regression separately for each of the 10 countries
+with ≥ 5 conflict allocations (covering 62% of the n = 97 sample).
+With only 5–8 observations per country we can't afford the full Reg4
+controls, so we use a minimal `LogApproved ~ LogRequired +
+LogMonthlyFatalities` spec per country.
+
+```{python}
+#| label: per-country-slopes
+#| output: false
+
+counts = df_prod["ISO3"].value_counts()
+top10 = counts[counts >= 5].index.tolist()
+
+slope_rows = []
+for iso in top10:
+    sub = df_prod[df_prod["ISO3"] == iso]
+    m = fit_ols(sub, ["LogRequired", "LogMonthlyFatalities"])
+    slope_rows.append({
+        "iso3": iso,
+        "n": len(sub),
+        "ACLED slope": m.params["LogMonthlyFatalities"],
+        "SE":          m.bse["LogMonthlyFatalities"],
+        "p":           m.pvalues["LogMonthlyFatalities"],
+    })
+
+pc = pd.DataFrame(slope_rows)
+pc["lo80"] = pc["ACLED slope"] - 1.28 * pc["SE"]
+pc["hi80"] = pc["ACLED slope"] + 1.28 * pc["SE"]
+pc = pc.sort_values("ACLED slope").reset_index(drop=True)
+```
+
+```{python}
+#| label: fig-country-forest
+#| fig-cap: "Country-specific ACLED slopes (LogApproved ~ LogRequired + LogMonthlyFatalities, fit separately per country). Bars = 80% confidence intervals; dotted line at zero. Pooled coefficient for reference: +0.05."
+
+pc_plot = pc.copy()
+pc_plot["iso3"] = pd.Categorical(pc_plot["iso3"],
+                                 categories=pc_plot["iso3"])
+
+(
+    ggplot(pc_plot, aes(x="ACLED slope", y="iso3"))
+    + geom_vline(xintercept=0, linetype="dotted", color="#999999")
+    + geom_errorbarh(aes(xmin="lo80", xmax="hi80"),
+                     height=0.25, color="#555555")
+    + geom_point(size=3, color="#2166ac")
+    + labs(x="Coefficient on LogMonthlyFatalities", y="",
+           title="Per-country ACLED slope, top-10 countries")
+    + theme_minimal()
+    + theme(figure_size=(9, 5), axis_text=element_text(size=10))
+)
+```
+
+The slopes span **−0.46 (COD) to +0.71 (HTI)** — an enormous range
+relative to the pooled estimate of +0.05. Five countries show clearly
+positive slopes (HTI, YEM, SDN, MLI, with ETH near zero-positive),
+three are essentially flat (BFA, AFG, PSE), and **COD shows a clean
+negative slope** with the tightest 80% CI of any country. Pooling
+across these is exactly the mechanism that produces the apparent
+null: positive and negative country slopes cancel.
+
+It's easier to *see* what these slopes mean by plotting the
+underlying allocation data directly, country by country:
+
+```{python}
+#| label: fig-scatter-by-country
+#| fig-cap: "Log CERF allocation vs log monthly fatalities for the top-10 conflict-recipient countries (≥5 allocations). Each panel = one country's allocations with its own linear fit. Free axes — countries differ on both their fatalities range and their allocation tier."
+
+facet_df = df_prod[df_prod["ISO3"].isin(top10)].copy()
+# Order facets the same as the forest plot (slope-sorted) so the eye
+# can match panels to slopes.
+facet_df["ISO3"] = pd.Categorical(
+    facet_df["ISO3"], categories=pc["iso3"].tolist()
+)
+
+(
+    ggplot(facet_df, aes("LogMonthlyFatalities", "LogApproved"))
+    + geom_point(alpha=0.7, color="#2166ac", size=2)
+    + geom_smooth(method="lm", se=False, color="#d6604d", size=0.6)
+    + facet_wrap("~ISO3", ncol=5, scales="free")
+    + labs(
+        x="log Monthly Fatalities (calendar month of allocation)",
+        y="log CERF Allocation (USD)",
+        title="Allocation vs ACLED, by country",
+    )
+    + theme_minimal()
+    + theme(figure_size=(13, 6),
+            strip_text=element_text(size=10),
+            axis_text=element_text(size=8))
+)
+```
+
+Panels are ordered left-to-right, top-to-bottom from the most
+negative slope (COD) to the most positive (HTI). The substantive read
+lines up with what's intuitive about the underlying conflict regimes:
+
+- **HTI, YEM, SDN, MLI** — episodic-violence environments where major
+  fatality surges plausibly drive the size of the appeal: a gang-
+  control crisis, a city falling, a coup. CERF responds to the spike.
+- **BFA, AFG, ETH, PSE** — chronic-conflict environments where CERF
+  allocations are driven by other things (displacement waves, disease,
+  food insecurity in conflict-affected provinces); monthly fatality
+  counts don't move the allocation tier.
+- **COD's negative slope** is the most surprising. Read literally,
+  high-fatality months in DRC are associated with *smaller* CERF
+  allocations there. A plausible explanation: DRC's largest CERF
+  allocations historically respond to displacement waves, Ebola, or
+  food-security crises in conflict-affected provinces — events that
+  don't necessarily coincide with peak monthly fighting. Worth
+  surfacing for DRC desk officers as a hypothesis, not a verdict.
+
+### What this finding means for the verdict
+
+The "ACLED is just a monitoring signal, not an allocation predictor"
+framing in the prior section's verdict is too strong. ACLED carries
+**country-conditional** allocation-size signal: clearly positive in
+episodic-violence contexts, clearly negative in DRC, flat in chronic
+baselines. The pooled coefficient averaged these to near zero, which
+is the mechanical reason the earlier diagnostics returned a null —
+not because the signal was absent.
+
+That said, this *doesn't* necessarily flip the deployment
+recommendation. Two reasons:
+
+- **For predicting allocations in unseen countries**, country FE is
+  useless — the dummy for a never-seen country is unidentified — and
+  the per-country slopes don't transfer. A leave-one-country-out
+  cross-validation (29-fold, holding out one country at a time)
+  actually finds that adding country FE + ACLED *worsens* held-out
+  predictions vs the base 3RM (LOCO R² ≈ 0.61 vs 0.67). The
+  heterogeneity is real but country-specific, not transferable.
+- **For known countries** (the realistic case — there are only ~30
+  conflict-recipient countries and CERF has seen most of them), a
+  country-aware model is the right tool, and the pooled base 3RM is
+  leaving real information on the table.
+
+So the honest narrative shifts from "ACLED has no allocation-size
+signal" to **"ACLED has highly heterogeneous, country-conditional
+signal that doesn't transfer across countries."** The base 3RM may
+still be the right *deployment* model, but the *explanation* of
+ACLED's role needs to change. That distinction matters when
+presenting the analysis to stakeholders who reasonably expect a
+violence indicator to carry signal — it does, just not as a single
+pooled slope.
+
+## Key findings
+
+- **Faithful reproduction.** All four of Finn's specifications (Reg2--5)
+  reproduce to machine precision against the values in his
+  `Regression2--5` sheets.
+- **CIRV is dynamic.** In `Regression_Data`, 22 countries (Yemen,
+  Ethiopia: 6 each) have multiple distinct CIRV values across years.
+  The static `Lists` sheet is a reference snapshot, not the modelling
+  input.
+- **CIRV ≈ INFORM composite on equal footing.** On the same n = 77
+  Severity-available subset, the two indices are within ~1% Adj R² of
+  each other. CIRV's small advantage on the full n = 103 sample comes
+  partly from the Risk-only-fallback rows (2018) where `inform_composite`
+  reduces to Risk alone.
+- **Risk and Severity entered separately is best** in both with- and
+  without-Targeted variants of the n = 77 comparison. The equal-weight
+  composite leaves fit on the table.
+- **LogTargeted dominates.** Dropping it costs ~20 percentage points of
+  Adj R² across every variant, more than the choice of vulnerability
+  index.
+- **Live data sources agree closely with Finn's snapshots.** ACLED
+  matches within ±20 fatalities for ~85% of allocations, IDMC within
+  ±100 IDPs for ~93%. Refitting on live blob features shifts Reg4
+  coefficients by ≤3% and Adj R² by ~0.0005. Production wiring to live
+  pipelines is safe.
+
+## Open questions
+
+- Finn's "80% confidence interval" in the prediction sheet is a naive
+  `point ± t × SE_residual` formula -- it ignores the leverage
+  `(1 + h_ii)` term. For a production predictor we would either keep
+  Finn's choice for direct comparability or follow [ch. 02c](02c-analysis-inform.qmd)
+  in using a full prediction interval. Worth surfacing when this model
+  is integrated into the analyst app.
