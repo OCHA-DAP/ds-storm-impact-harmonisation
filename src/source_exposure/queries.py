@@ -109,39 +109,32 @@ def qualifying_storms(engine) -> pd.DataFrame:
 # ─────────────────────────────────────────────────────────────────────
 
 def fetch_chd(engine, atcf_ids: list[str], admin_level: int) -> pd.DataFrame:
-    """Columns: atcf_id, iso3, unit, wind_speed_kt, chd_pop
-    (chd_pop = observed-final + forecast-only-final)."""
+    """Columns: atcf_id, iso3, unit, wind_speed_kt, chd_pop.
+
+    chd_pop = **observed-final** exposure only (latest valid_time per unit).
+
+    The forecast-only term is intentionally NOT added. `nhc_tracks_fcastonly_exposure`
+    is a *per-issuance* metric — the forecast buffer minus the cumulative observed
+    swath at each `issued_time` — that decays to ~0 as a storm completes; the
+    pipeline keeps it as a separate band and never sums it with observed. Adding its
+    per-unit *latest* row summed stale pre-observation peaks at adm1 (≈20M/storm
+    phantom) and broke adm0 = Σ(adm1) conservation. For this retrospective,
+    completed-storm comparison the realized observed footprint *is* the exposure,
+    and it conserves across levels. (Hard switch — Option A.)
+    """
     cols = ["atcf_id", "iso3", "unit", "wind_speed_kt", "chd_pop"]
     if not atcf_ids:
         return pd.DataFrame(columns=cols)
-    sql = _expand2("""
-        WITH obsv AS (
-            SELECT DISTINCT ON (atcf_id, pcode, wind_speed_kt)
-                atcf_id, iso3, pcode, wind_speed_kt, pop_exposed
-            FROM storms.nhc_tracks_obsv_exposure
-            WHERE atcf_id IN :ids_o AND admin_level = :lvl
-            ORDER BY atcf_id, pcode, wind_speed_kt, valid_time DESC
-        ),
-        fcast AS (
-            SELECT DISTINCT ON (atcf_id, pcode, wind_speed_kt)
-                atcf_id, iso3, pcode, wind_speed_kt, pop_exposed
-            FROM storms.nhc_tracks_fcastonly_exposure
-            WHERE atcf_id IN :ids_f AND admin_level = :lvl
-            ORDER BY atcf_id, pcode, wind_speed_kt, issued_time DESC
-        )
-        SELECT COALESCE(o.atcf_id, f.atcf_id) AS atcf_id,
-               COALESCE(o.iso3, f.iso3)       AS iso3,
-               COALESCE(o.pcode, f.pcode)     AS unit,
-               COALESCE(o.wind_speed_kt, f.wind_speed_kt) AS wind_speed_kt,
-               COALESCE(o.pop_exposed, 0) + COALESCE(f.pop_exposed, 0) AS chd_pop
-        FROM obsv o
-        FULL OUTER JOIN fcast f
-          ON o.atcf_id = f.atcf_id AND o.pcode = f.pcode
-         AND o.wind_speed_kt = f.wind_speed_kt
+    sql = _expand("""
+        SELECT DISTINCT ON (atcf_id, pcode, wind_speed_kt)
+            atcf_id, iso3, pcode AS unit, wind_speed_kt,
+            pop_exposed AS chd_pop
+        FROM storms.nhc_tracks_obsv_exposure
+        WHERE atcf_id IN :atcf_ids AND admin_level = :lvl
+        ORDER BY atcf_id, pcode, wind_speed_kt, valid_time DESC
     """)
     return pd.read_sql(sql, engine,
-                       params={"ids_o": atcf_ids, "ids_f": atcf_ids,
-                               "lvl": admin_level})
+                       params={"atcf_ids": atcf_ids, "lvl": admin_level})
 
 
 # ─────────────────────────────────────────────────────────────────────
