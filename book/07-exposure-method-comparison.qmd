@@ -1,5 +1,5 @@
 ---
-title: "OCHA vs GDACS: Exposure Method Comparison"
+title: "Old exposure comparison (OCHA vs GDACS, superseded)"
 jupyter: ds-storm-impact
 ---
 

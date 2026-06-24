@@ -16,6 +16,20 @@ dev database via `src/source_exposure` (the same `build_exposure` logic behind t
 harmonised workbook) and reads the persisted per-storm source diagnostic. It does
 not depend on any scratch artefacts.
 
+::: {.callout-tip}
+## Key findings
+
+- **Effectively two independent sources** — ADAM is a near-duplicate of GDACS
+  (log-correlation 0.94), so the comparison is really CHD vs the GDACS family
+  ([@fig-adam-redundancy]).
+- **The comparable record is thin** — GDACS produces a usable per-country exposure
+  for only ~60 storms (its ~2016–2022 data gaps), so most of the record can't be
+  compared ([@fig-gdacs-states]).
+- **CHD reads about half of GDACS** where both find people — median CHD/GDACS ≈ 0.5
+  on both-positive units; the two also disagree on *who* is exposed about as often
+  as not (κ ≈ 0) ([@fig-magnitude]).
+:::
+
 ## TL;DR
 
 1. **It is not a three-way contest.** **ADAM is a thin near-duplicate of GDACS**
@@ -27,15 +41,11 @@ not depend on any scratch artefacts.
    single storm-wide total). For its ~2016–2022 era `getimpact` returns `-1`
    ("not computed"), so for **118 storms GDACS has only a storm total, no
    per-country breakdown** (Matthew, Maria, Harvey among them). Those are **data
-   gaps, not zeros** — the per-country comparison is genuinely thin (~60 storms),
-   and the old "fake-zero" reading of those NULLs is what this chapter corrects.
-3. **Where comparable, CHD reads lower — except in subnational aggregate.** On
-   both-positive units CHD runs systematically below GDACS (median CHD/GDACS
-   ≈ 0.61 adm0, 0.41 adm1), and at **adm0 that holds in aggregate too (0.52×)**.
-   At **adm1 CHD's broader subnational footprint flips the aggregate (1.51×)** —
-   it assigns exposure to many subnational units GDACS leaves at a true 0; a real
-   coverage difference, not a fake-zero artefact. The sources also disagree on
-   *who* is exposed about as often as not (κ ≈ 0).
+   gaps, not zeros**, so the per-country comparison is genuinely thin (~60 storms).
+3. **Where comparable, CHD reads about half of GDACS.** On units where both find
+   people CHD runs systematically below GDACS (median CHD/GDACS ≈ 0.5), and this
+   holds at both the country (adm0) and subnational (adm1) level. The sources also
+   disagree on *who* is exposed about as often as not (κ ≈ 0).
 
 ## Method: the GDACS five-case zero-vs-NaN rule
 
@@ -63,7 +73,13 @@ genuine zero from missing data**:
 | 4 | per-country `-1`/NULL, **or** no per-country value but **storm total > 0** | **NaN** (storm total only — no per-country breakdown) |
 | 5 | storm not tracked, or 50 kt (GDACS has no 50 kt buffer) | **NaN** |
 
-CHD is our own NHC DB, so a missing value is a true 0. The **per-country**
+CHD is our own NHC DB, so a missing value is a true 0. **All three values are
+each storm's final converged estimate** — CHD the realized observed-track
+footprint (latest `valid_time` per unit, no forecast term added); GDACS and ADAM
+their final per-episode footprint, which likewise ramps as the footprint
+establishes then plateaus at the realized value. The comparison is therefore
+like-for-like: final assessed exposure, with no forecast component on any side.
+The **per-country**
 comparison runs over cells where GDACS is non-NaN (cases 1–3); case-4 storms are
 recoverable only at the **storm-total** grain (§5b). Magnitude statistics (log
 scatter, ratio, Bland–Altman) use **both-positive** cells only — log(0) is
@@ -256,8 +272,7 @@ the per-country breakdown (`getimpact` = -1), so they are **NaN per country** an
 recoverable only as a storm total (§5b). **Maria, Harvey and Matthew sit here** —
 large, real storms GDACS *did* size storm-wide (12M / 0.5M / 18M), just never
 broke down by country. So the per-country comparison is genuinely thin (~60
-storms), and the old reading that treated those `-1`s as zeros manufactured a
-large fake zero-gap.
+storms): a `-1` is a missing per-country breakdown, not a zero.
 
 ## 1. Coverage — who reports which storms
 
@@ -411,9 +426,9 @@ plt.show()
 
 Where both sources report a positive adm0 exposure, **GDACS and ADAM agree almost
 perfectly** (log-r 0.94, median 0.96, 87% within 2×, near-zero bias). **CHD
-disagrees with both, in the same direction** — it reports ~⅓ as many people
-(median ratios 0.61 / 0.69), with wide, heteroscedastic scatter. So two sources
-are near-clones and CHD is the systematic low outlier.
+disagrees with both, in the same direction** — it reports about half as many
+people (median ratios 0.58 / 0.57), with wide, heteroscedastic scatter. So two
+sources are near-clones and CHD is the systematic low outlier.
 
 ## 3. Bland–Altman and the agreement table
 
@@ -491,7 +506,7 @@ essentially no independent signal. **GDACS+ADAM should be treated as one source.
 ```{python}
 #| label: fig-fourcell
 #| code-fold: true
-#| fig-cap: "Four-cell split of the adm0 overlap per pair (GDACS cells now 0-vs-NaN per the five-case rule). For CHD vs GDACS the *defensible* zero-gap (CHD>0, GDACS true 0) is now modest — about the size of the both-positive set, not the dominant cell it appeared to be when GDACS's -1 values were fake-zeroed."
+#| fig-cap: "Four-cell split of the adm0 overlap per pair (GDACS cells are 0-vs-NaN per the five-case rule). For CHD vs GDACS the *defensible* zero-gap (CHD>0, GDACS true 0) is modest relative to the both-positive set, because GDACS's -1 'not computed' values are held out as NaN rather than counted as 0."
 cells = ["n_both_pos", "n_a_pos_b_zero", "n_b_pos_a_zero", "n_both_zero"]
 clab = {"n_both_pos": "both positive", "n_a_pos_b_zero": "A>0, B=0",
         "n_b_pos_a_zero": "B>0, A=0", "n_both_zero": "both 0"}
@@ -540,11 +555,11 @@ fig.tight_layout()
 plt.show()
 ```
 
-Of the **484** CHD-vs-GDACS adm0 comparable cells (both non-NaN), **199 are
-both-positive**, **84 are CHD-positive while GDACS is a true 0** (case 2/3 — GDACS
-computed the storm but didn't place this country in its footprint), and 63 the
-reverse. These are *defensible* zeros, not the old 442 fake zeros — those came
-from treating GDACS's `-1` "not computed" values as 0, and are now correctly NaN.
+Of the **418** CHD-vs-GDACS adm0 comparable cells (both non-NaN), **153 are
+both-positive**, **38 are CHD-positive while GDACS is a true 0** (case 2/3 — GDACS
+computed the storm but didn't place this country in its footprint), and 109 the
+reverse (GDACS positive, CHD a true 0). These are *defensible* zeros — GDACS's
+`-1` "not computed" values are excluded as NaN, never counted as 0.
 
 ### 5b. The missing storms — recoverable only as a storm total
 
@@ -590,7 +605,7 @@ which is exactly why the per-country comparison stays at ~60 storms.
 ```{python}
 #| label: fig-adm1-scatter
 #| code-fold: true
-#| fig-cap: "adm1 both-positive scatter per pair (vs the adm0 log-r inline). CHD-vs-GDACS degrades most going subnational (log-r 0.50 vs 0.68, median 0.41); GDACS-vs-ADAM stays tight."
+#| fig-cap: "adm1 both-positive scatter per pair (vs the adm0 log-r inline). CHD-vs-GDACS degrades most going subnational (log-r 0.60 vs 0.79, median 0.43); GDACS-vs-ADAM stays tight."
 fig, axes = plt.subplots(1, 3, figsize=(14, 4.6))
 for ax, (a, b) in zip(axes, PAIRS):
     d = both_positive(panel1, a, b)
@@ -677,7 +692,7 @@ fig.tight_layout(rect=(0, 0.04, 1, 0.94))
 plt.show()
 ```
 
-Going subnational, CHD-vs-GDACS drops from log-r 0.68 → 0.50 (median 0.41).
+Going subnational, CHD-vs-GDACS drops from log-r 0.79 → 0.60 (median 0.43).
 Restricted to the GDACS-computed storms, **most of the divergence is genuine
 measurement difference** (both-positive + real zero-gap), not a matching artefact.
 
@@ -686,11 +701,9 @@ measurement difference** (both-positive + real zero-gap), not a matching artefac
 The magnitude view (§2–§3) drops zeros. With the five-case fills in place, the
 **comparable set** is simply every (storm, country, threshold) where GDACS is
 non-NaN — cases 1–3 (a positive value or a *defensible* 0), with the case-4/5
-gaps excluded. Putting the true 0s back lets us ask two questions the magnitude
-lens can't: do the sources agree on *who* is exposed, and on the *total*? Both
-sources are summed/compared over exactly the same cells (a NaN on either side
-drops the cell for both). First, the comparable set on **symlog** axes so the
-true 0s are visible:
+gaps excluded. Putting the true 0s back lets us ask a question the magnitude lens
+can't: do the sources agree on *who* is exposed? First, the comparable set on
+**symlog** axes so the true 0s are visible:
 
 ```{python}
 #| label: fig-fullscatter
@@ -726,7 +739,7 @@ fig.tight_layout()
 plt.show()
 ```
 
-Two questions only the zeros can answer:
+The question only the zeros can answer:
 
 ```{python}
 #| label: fig-presence
@@ -761,10 +774,53 @@ fig.tight_layout()
 plt.show()
 ```
 
+With the true 0s in, the two sources **agree on who is even exposed only about
+half the time** (κ ≈ 0) — barely better than chance. The off-diagonal is
+dominated by the *zero-gap*: cells where CHD assigns exposure but GDACS computed a
+true 0. So the magnitude lens (§2–§3) and the presence lens tell the same story
+from two angles — CHD is the systematic low outlier on shared positives, and the
+two sources frequently disagree on whether a unit is exposed at all.
+
+## Caveats
+
+- **The pairwise correlations are not directly comparable** — CHD-vs-GDACS,
+  CHD-vs-ADAM and GDACS-vs-ADAM are computed on different, largely
+  non-overlapping storm sets. ADAM's small n (~44 storms) makes its statistics
+  fragile.
+- **The per-country comparison is thin (~60 storms).** GDACS's `getimpact`
+  per-country breakdown is `-1` ("not computed") for ~118 storms (its ~2016–2022
+  era). Those are **NaN per country, not zeros** — treating the `-1`s as 0 would
+  manufacture a large fake zero-gap.
+- **GDACS still has a storm total for the missing storms.** `gettimeline`
+  computed a storm-wide total (Maria 11.6M, Matthew 18.3M) even where `getimpact`
+  is `-1`; §5b recovers those at the storm-total grain, but a storm total cannot
+  enter the per-country grid.
+- **adm1 magnitudes are matched-units-only**, and the both-positive correlation
+  describes a minority of the overlap — always report it alongside the zero-gap.
+- **Operational windows differ** (GDACS 2015+, ADAM 2023+); coverage must be read
+  on a same-era footing.
+
+## Headline
+
+**GDACS+ADAM are one source, and it produces a usable *per-country* exposure for
+only ~60 storms — the rest are data gaps (a storm total only) or genuine zeros.
+Where comparable, CHD reads about half of GDACS per shared unit (median ≈ 0.5),
+consistently at both the country and subnational level; and the two agree on
+*who* is exposed only about half the time (κ ≈ 0).**
+
+## Appendix: comparing aggregate ratios across admin levels
+
+It is tempting to compare the *aggregate* CHD/GDACS ratio — total exposed summed
+over the comparable set — between adm0 and adm1. **That comparison is not
+meaningful, because the comparable set is a different population of cells at each
+level.** The aggregate runs over cells where *both* sources are non-NaN, and that
+overlap is selected differently at adm0 than at adm1. The robust magnitude figure
+is the both-positive ratio (≈ 0.5, §2–§3), not the aggregate.
+
 ```{python}
 #| label: fig-aggregate
 #| code-fold: true
-#| fig-cap: "Aggregate over the comparable set, split into both-positive vs the defensible zero-gap. On both-positive units GDACS is higher (CHD/GDACS ≈ 0.49 adm0, 0.59 adm1). At adm0 the small zero-gap leaves CHD's total below GDACS (0.52×); at adm1 the larger zero-gap — CHD's broader subnational footprint, all defensible true 0s — lifts CHD's total above GDACS (1.51×). A real coverage difference, not a fake-zero artefact."
+#| fig-cap: "Aggregate over the comparable set, split into both-positive units vs the zero-gap (where the other source is a true 0). CHD's total stays below GDACS at both adm0 and adm1. The adm1 ratio is higher than adm0 only because the adm1 comparable set differs (decomposed below), not because of any real subnational coverage difference."
 fig, axes = plt.subplots(1, 2, figsize=(12, 4.8))
 for ax, (panel, lvl) in zip(axes, ((panel0, "adm0"), (panel1, "adm1"))):
     d = full_comparable(panel)
@@ -785,50 +841,42 @@ for ax, (panel, lvl) in zip(axes, ((panel0, "adm0"), (panel1, "adm1"))):
     ax.set_ylabel("total exposed over comparable units (millions)")
     bp_ratio = ce[bp].sum() / ge[bp].sum(); tot_ratio = ce.sum() / ge.sum()
     ax.set_title(f"{lvl}: both-positive CHD/GDACS={bp_ratio:.2f}, "
-                 f"total={tot_ratio:.2f}\n" +
-                 ("zero-gap lifts CHD above GDACS" if tot_ratio > 1
-                  else "CHD stays below GDACS"), fontsize=9.5)
+                 f"total={tot_ratio:.2f}\nCHD stays below GDACS", fontsize=9.5)
     ax.legend(fontsize=8, frameon=False)
-fig.suptitle("Aggregate: CHD below GDACS at adm0, above at adm1 "
-             "(broader subnational footprint)", fontsize=12, fontweight="bold")
+fig.suptitle("Aggregate over the comparable set: CHD below GDACS at both levels",
+             fontsize=12, fontweight="bold")
 fig.tight_layout()
 plt.show()
 ```
 
-The full comparison reframes the headline honestly. Per shared unit CHD runs
-~30–60% *below* GDACS, and at **adm0 that holds in aggregate too** (total CHD/GDACS
-≈ **0.52**). At **adm1 the direction flips to CHD-higher** (≈ **1.51**) — but this
-time it is **not a fake-zero artefact**; it is a real coverage difference, CHD
-assigning exposure to many subnational units GDACS computed as a true 0. The
-sources also **agree on who is even exposed only about half the time** (κ ≈ 0).
-*Neither lens alone is complete:* both-positive says "CHD is the systematic low
-outlier"; the full view adds "CHD's broader subnational footprint lifts its adm1
-total above GDACS, and the two disagree on presence as often as not."
+Decomposing the adm1 aggregate shows where its higher ratio comes from:
 
-## Caveats
+```{python}
+#| label: tbl-aggregate-levels
+#| code-fold: true
+ov0 = overlap(panel0, "chd", "gdacs")
+ov1 = overlap(panel1, "chd", "gdacs")
+comp0 = set(zip(ov0.storm_id, ov0.iso3, ov0.wind_speed_kt))
+inc0 = [(s, i, k) in comp0 for s, i, k in
+        zip(ov1.storm_id, ov1.iso3, ov1.wind_speed_kt)]
+ov1 = ov1.assign(inc0=inc0)
+same = ov1[ov1.inc0]; extra = ov1[~ov1.inc0]
+rows = [("adm0 — comparable countries", ov0.chd_exposure.sum(), ov0.gdacs_exposure.sum()),
+        ("adm1 — same countries as adm0", same.chd_exposure.sum(), same.gdacs_exposure.sum()),
+        ("adm1 — all comparable units", ov1.chd_exposure.sum(), ov1.gdacs_exposure.sum())]
+tab = pd.DataFrame(rows, columns=["basis", "CHD_raw", "GDACS_raw"])
+tab["CHD/GDACS"] = (tab.CHD_raw / tab.GDACS_raw).round(2)
+tab["CHD"] = tab.CHD_raw.map(human); tab["GDACS"] = tab.GDACS_raw.map(human)
+print(f"adm1 units in countries NOT in the adm0 comparable set: {len(extra)} units, "
+      f"CHD {human(extra.chd_exposure.sum())}, GDACS {human(extra.gdacs_exposure.sum())}")
+tab[["basis", "CHD", "GDACS", "CHD/GDACS"]].set_index("basis")
+```
 
-- **The pairwise correlations are not directly comparable** — CHD-vs-GDACS,
-  CHD-vs-ADAM and GDACS-vs-ADAM are computed on different, largely
-  non-overlapping storm sets. ADAM's small n (~44 storms) makes its statistics
-  fragile.
-- **The per-country comparison is thin (~60 storms).** GDACS's `getimpact`
-  per-country breakdown is `-1` ("not computed") for ~118 storms (its ~2016–2022
-  era). Those are **NaN per country, not zeros** — treating the `-1`s as 0 (the
-  old approach) manufactured a large fake zero-gap and a spurious aggregate flip.
-- **GDACS still has a storm total for the missing storms.** `gettimeline`
-  computed a storm-wide total (Maria 11.6M, Matthew 18.3M) even where `getimpact`
-  is `-1`; §5b recovers those at the storm-total grain, but a storm total cannot
-  enter the per-country grid.
-- **adm1 magnitudes are matched-units-only**, and the both-positive correlation
-  describes a minority of the overlap — always report it alongside the zero-gap.
-- **Operational windows differ** (GDACS 2015+, ADAM 2023+); coverage must be read
-  on a same-era footing.
-
-## Headline
-
-**GDACS+ADAM are one source, and it produces a usable *per-country* exposure for
-only ~60 storms — the rest are data gaps (a storm total only) or genuine zeros,
-not the fake zeros the old reading implied. Where comparable, CHD reads lower per
-unit; in aggregate CHD is below GDACS at adm0 (0.52×) but above at adm1 (1.51×,
-its broader subnational footprint); and the two agree on *who* is exposed only
-about half the time (κ ≈ 0).**
+Restricted to the **same countries** that are comparable at adm0, the ratio is
+essentially flat going to adm1 — CHD's comparable total barely changes (it
+conserves across levels, adm0 ≈ Σ adm1). The higher *all-comparable* adm1 ratio
+comes entirely from **subnational units in countries GDACS does not report at
+adm0**: there GDACS is a 0 while CHD has people, so they enter the adm1 numerator
+with nothing in the denominator. That is a GDACS adm0-vs-adm1 reporting
+inconsistency (adm0 = NaN, adm1 = 0), not a subnational coverage signal — which is
+why magnitude should be read from the both-positive ratio, not the aggregate.

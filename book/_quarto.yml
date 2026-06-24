@@ -29,11 +29,12 @@ book:
     - part: "Exposure Method Comparison"
       chapters:
         - 09-source-comparison.qmd
-        - 07-exposure-method-comparison.qmd
+        - 10-max-methodology.qmd
     - part: "Appendices"
       chapters:
         - 01-data-merge.qmd
         - 03-appendix-adam-gdacs.qmd
+        - 07-exposure-method-comparison.qmd
 
 format:
   html:
