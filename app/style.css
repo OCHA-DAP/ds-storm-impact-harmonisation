@@ -143,3 +143,4 @@ td.na { color: var(--ink3); }
 #tooltip .t-key { width: 14px; border-top: 2.5px solid; display: inline-block; flex: none; }
 #tooltip .t-val { font-weight: 600; font-variant-numeric: tabular-nums; }
 #tooltip .t-lbl { color: var(--ink2); }
+
