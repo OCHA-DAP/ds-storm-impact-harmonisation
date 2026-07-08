@@ -191,3 +191,5 @@ data/
 
 temp
 .venv
+app/data/
+

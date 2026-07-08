@@ -1,0 +1,63 @@
+name: Deploy exposure apps to GitHub Pages
+
+# Builds one Pages site containing both apps:
+#   /         — Cyclone Exposure Dashboard (from the gdacs-adam-data branch)
+#   /compare/ — storm exposure comparison app (app/ + data exported from the DB)
+# Data is shipped as a deploy artifact only — it is never committed to git.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * *" # daily 06:00 UTC
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout dashboard branch (site root)
+        uses: actions/checkout@v4
+        with:
+          ref: gdacs-adam-data
+          path: dashboard
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Export app data from database
+        env:
+          DSCI_AZ_DB_DEV_HOST: ${{ secrets.DSCI_AZ_DB_DEV_HOST }}
+          DSCI_AZ_DB_DEV_UID: ${{ secrets.DSCI_AZ_DB_DEV_UID }}
+          DSCI_AZ_DB_DEV_PW: ${{ secrets.DSCI_AZ_DB_DEV_PW }}
+        run: uv run python export_app_data.py
+
+      - name: Assemble site
+        run: |
+          mkdir -p site/compare
+          rsync -a dashboard/index.html dashboard/assets site/
+          rsync -a app/ site/compare/
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
