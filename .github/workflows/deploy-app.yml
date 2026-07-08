@@ -9,9 +9,6 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "0 6 * * *" # daily 06:00 UTC
-  push:
-    branches: [compare-exposure-app] # TODO remove after merge; pre-merge testing only
-    paths: [".github/workflows/deploy-app.yml"]
 
 permissions:
   contents: read
