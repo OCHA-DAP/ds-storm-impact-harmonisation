@@ -118,8 +118,9 @@ function stormMaxTotals(ws) {
 function defaultThreshold(ws) {
   const vals = stormMaxTotals(ws);
   if (!vals.length) return 100000;
-  // round-half-down so a 26-year record at RP 4 picks the 6th storm, not the 7th
-  const k = Math.min(Math.max(Math.floor(S.years / TARGET_RP + 0.5 - 1e-9), 1), vals.length);
+  // Weibull plotting position (team standard, methods/return-periods.md):
+  // RP = (n_years + 1) / n_activations
+  const k = Math.min(Math.max(Math.floor((S.years + 1) / TARGET_RP + 0.5 - 1e-9), 1), vals.length);
   const v = vals[k - 1];
   const mag = Math.pow(10, Math.max(Math.floor(Math.log10(v)) - 1, 0));
   return Math.max(Math.floor(v / mag) * mag, 1000);
@@ -773,7 +774,7 @@ function renderMetrics() {
   const rows = rankedRows(Infinity);
   const n = rows.filter((r) => r.trigT).length;
   $("mTrig").textContent = `${n}/${rows.length}`;
-  $("mRP").textContent = n ? `≈ ${(S.years / n).toFixed(1)} yr` : "—";
+  $("mRP").textContent = n ? `≈ ${((S.years + 1) / n).toFixed(1)} yr` : "—";
 }
 
 function renderCountryHeader() {
