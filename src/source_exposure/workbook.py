@@ -192,24 +192,24 @@ def build_exposure(engine, level: int, aids: list[str],
                                panel["adam_pop"].notna())]
 
     panel = panel.rename(columns={
-        "unit": "pcode", "fm_name": "admin_name",
+        "unit": "admin_pcode", "fm_name": "admin_name",
         "chd_pop": "chd_exposure", "gdacs_pop": "gdacs_exposure",
         "adam_pop": "adam_exposure"})
 
     if level == 1:
         base = ["atcf_id", "storm_name", "season", "admin_level", "iso3",
-                "country_name", "pcode", "admin_name", "wind_speed_kt",
+                "country_name", "admin_pcode", "admin_name", "wind_speed_kt",
                 "sources", "chd_exposure", "gdacs_exposure", "adam_exposure"]
         extra = ["gdacs_admin1_name", "adam_admin1_name", "alt_adm1_name",
                  "adm1_caveat"]
     else:
-        # adm0: pcode == iso3, so drop it as redundant.
+        # adm0: admin_pcode == iso3, so drop it as redundant.
         base = ["atcf_id", "storm_name", "season", "admin_level", "iso3",
                 "admin_name", "wind_speed_kt", "sources",
                 "chd_exposure", "gdacs_exposure", "adam_exposure"]
         extra = []
     panel = panel.sort_values(
-        ["season", "atcf_id", "iso3", "pcode", "wind_speed_kt"])
+        ["season", "atcf_id", "iso3", "admin_pcode", "wind_speed_kt"])
     return panel[base + extra].reset_index(drop=True)
 
 
