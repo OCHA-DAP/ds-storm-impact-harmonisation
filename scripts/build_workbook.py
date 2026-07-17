@@ -57,8 +57,8 @@ def _readme_blocks(storms, adm0, adm1, caveats, generated):
           f"({len(storms)} storms): name, season, basin, GDACS/ADAM cross-ids, "
           f"which sources report exposure, which have the storm on record, and "
           f"a note (note_gdacs_adam) explaining every GDACS/ADAM gap. The storm "
-          f"key on every tab is atcf_id, the NHC ATCF identifier (e.g. "
-          f"AL132025)."),
+          f"key here and on both exposure tabs is atcf_id, the NHC ATCF "
+          f"identifier (e.g. AL132025)."),
         B("bullet", f"adm0_exposure — country level ({len(adm0):,} rows): one "
           f"row per storm × country × wind threshold."),
         B("bullet", f"adm1_exposure — subnational FieldMaps units "
