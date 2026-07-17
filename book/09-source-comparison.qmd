@@ -185,11 +185,10 @@ panel1 = wb.build_exposure(eng, 1, aids, gd_rep, ad_rep, resolve)
 
 # storm roster (presence denominator: all 939 NHC storms >= 2001)
 meta = (q.all_nhc_storms(eng, wb.MIN_SEASON)[
-        ["atcf_id", "storm_name", "season", "basin"]]
-        .rename(columns={"atcf_id": "storm_id"}))
-meta["chd_reported"] = meta.storm_id.isin(chd_rep)
-meta["gdacs_reported"] = meta.storm_id.isin(gd_rep)
-meta["adam_reported"] = meta.storm_id.isin(ad_rep)
+        ["atcf_id", "storm_name", "season", "basin"]])
+meta["chd_reported"] = meta.atcf_id.isin(chd_rep)
+meta["gdacs_reported"] = meta.atcf_id.isin(gd_rep)
+meta["adam_reported"] = meta.atcf_id.isin(ad_rep)
 
 # per-storm comparability from the persisted source diagnostic
 HOLDS, ZERO = {"have_exposure"}, {"reported_zero", "served_zero"}
@@ -206,10 +205,10 @@ def classify(status):
 
 
 diag = sd.load_status()
-comp = meta.merge(diag, left_on="storm_id", right_on="atcf_id", how="left")
+comp = meta.merge(diag, on="atcf_id", how="left")
 comp["gdacs_class"] = comp["gdacs_status"].map(classify)
 comp["adam_class"] = comp["adam_status"].map(classify)
-GCLASS = comp.set_index("storm_id")["gdacs_class"]
+GCLASS = comp.set_index("atcf_id")["gdacs_class"]
 
 # GDACS five-case STATE per storm (authoritative — uses the timeline storm total,
 # unlike the persisted diagnostic CSV which predates the fix and mislabels the
@@ -225,8 +224,8 @@ def gdacs_state(sid):
         return "genuine_zero" if (t39 == 0 and t74 == 0) else "missing"
     return "not_tracked"                  # GDACS never saw the storm
 
-comp["gdacs_state"] = comp["storm_id"].map(gdacs_state)
-STATE = comp.set_index("storm_id")["gdacs_state"]
+comp["gdacs_state"] = comp["atcf_id"].map(gdacs_state)
+STATE = comp.set_index("atcf_id")["gdacs_state"]
 ```
 
 ## 0. How much GDACS exposure is actually comparable?
@@ -280,9 +279,9 @@ storms): a `-1` is a missing per-country breakdown, not a zero.
 #| label: fig-coverage-sets
 #| code-fold: true
 #| fig-cap: "Storm-level coverage — counting which storms each source produces a POSITIVE per-country exposure number for (GDACS case 1/2 only). CHD 611, GDACS 60, ADAM 44 of 939 storms. GDACS's count is small because its per-country footprint is missing (getimpact = -1) for ~116 storms; ADAM, which computes exposure independently, sits partly outside that thin GDACS-positive set. The bar gives the exact 7-cell breakdown."
-chd = set(meta.loc[meta.chd_reported, "storm_id"])
-gd = set(meta.loc[meta.gdacs_reported, "storm_id"])
-ad = set(meta.loc[meta.adam_reported, "storm_id"])
+chd = set(meta.loc[meta.chd_reported, "atcf_id"])
+gd = set(meta.loc[meta.gdacs_reported, "atcf_id"])
+ad = set(meta.loc[meta.adam_reported, "atcf_id"])
 n_chd, n_gd, n_ad = len(chd), len(gd), len(ad)
 cell = {"CHD only": len(chd - gd - ad), "CHD&GDACS": len((chd & gd) - ad),
         "all three": len(chd & gd & ad), "CHD&ADAM": len((chd & ad) - gd),
@@ -572,9 +571,9 @@ CHD's national sum vs GDACS's storm total:
 #| label: fig-storm-total
 #| code-fold: true
 #| fig-cap: "Storm-total comparison for the GDACS `missing` storms (per-country = -1, but a real gettimeline total). CHD's 34 kt national sum vs GDACS's pop39 storm total. These are dropped entirely from the per-country grid; at the storm grain they are comparable and GDACS's totals are large and real (Matthew, Maria, …)."
-miss = comp[comp.gdacs_state == "missing"].storm_id
-chd_tot = (panel0[(panel0.storm_id.isin(miss)) & (panel0.wind_speed_kt == 34)]
-           .groupby("storm_id").agg(name=("storm_name", "first"),
+miss = comp[comp.gdacs_state == "missing"].atcf_id
+chd_tot = (panel0[(panel0.atcf_id.isin(miss)) & (panel0.wind_speed_kt == 34)]
+           .groupby("atcf_id").agg(name=("storm_name", "first"),
             chd=("chd_exposure", "sum")))
 chd_tot["gd_timeline"] = chd_tot.index.map(
     lambda s: tlt.loc[s, "timeline_pop39_max"] if s in tlt.index else np.nan)
@@ -633,7 +632,7 @@ plt.show()
 #| fig-cap: "Why adm1 GDACS diverges from CHD, restricted to the GDACS-*computed* storms (the ~60 with a per-country footprint). Within them, most units and the large majority of people are genuine measurement divergence (both-positive + real zero-gap), not a matching artefact."
 dk = restrict_kt(panel1, "chd", "gdacs")
 chdpos = dk[dk.chd_exposure > 0].copy()
-chdpos["gstate"] = chdpos.storm_id.map(STATE)
+chdpos["gstate"] = chdpos.atcf_id.map(STATE)
 chdpos = chdpos[chdpos.gstate == "computed"]   # GDACS produced a per-country footprint
 
 
@@ -856,9 +855,9 @@ Decomposing the adm1 aggregate shows where its higher ratio comes from:
 #| code-fold: true
 ov0 = overlap(panel0, "chd", "gdacs")
 ov1 = overlap(panel1, "chd", "gdacs")
-comp0 = set(zip(ov0.storm_id, ov0.iso3, ov0.wind_speed_kt))
+comp0 = set(zip(ov0.atcf_id, ov0.iso3, ov0.wind_speed_kt))
 inc0 = [(s, i, k) in comp0 for s, i, k in
-        zip(ov1.storm_id, ov1.iso3, ov1.wind_speed_kt)]
+        zip(ov1.atcf_id, ov1.iso3, ov1.wind_speed_kt)]
 ov1 = ov1.assign(inc0=inc0)
 same = ov1[ov1.inc0]; extra = ov1[~ov1.inc0]
 rows = [("adm0 — comparable countries", ov0.chd_exposure.sum(), ov0.gdacs_exposure.sum()),

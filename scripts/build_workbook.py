@@ -56,7 +56,9 @@ def _readme_blocks(storms, adm0, adm1, caveats, generated):
         B("bullet", f"storms — every NHC storm from {MIN_SEASON} on "
           f"({len(storms)} storms): name, season, basin, GDACS/ADAM cross-ids, "
           f"which sources report exposure, which have the storm on record, and "
-          f"a note (note_gdacs_adam) explaining every GDACS/ADAM gap."),
+          f"a note (note_gdacs_adam) explaining every GDACS/ADAM gap. The storm "
+          f"key here and on both exposure tabs is atcf_id, the NHC ATCF "
+          f"identifier (e.g. AL132025)."),
         B("bullet", f"adm0_exposure — country level ({len(adm0):,} rows): one "
           f"row per storm × country × wind threshold."),
         B("bullet", f"adm1_exposure — subnational FieldMaps units "
@@ -145,7 +147,7 @@ def main():
         style.style_data_sheet(
             wb["storms"], plain_cols=["gdacs_eventid", "adam_eventid", "season"],
             widths=_STORM_W,
-            # Visible: storm_id, storm_name, season, basin, sources_with_record,
+            # Visible: atcf_id, storm_name, season, basin, sources_with_record,
             # note_gdacs_adam. Everything else kept for filtering but hidden.
             hidden=["gdacs_eventid", "adam_eventid", "sources_reporting_exposure",
                     "has_chd_exposure", "has_gdacs_exposure",
