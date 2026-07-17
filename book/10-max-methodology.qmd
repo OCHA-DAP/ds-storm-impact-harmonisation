@@ -140,7 +140,7 @@ panel1 = wb.build_exposure(eng, 1, aids, gd_rep, ad_rep, resolve)
 R0 = recent(panel0)   # adm0, recent era, missing=0
 R1 = recent(panel1)   # adm1, recent era, missing=0
 KT = R0.wind_speed_kt.isin([34, 64])
-n_storms = recent(panel0)["storm_id"].nunique()
+n_storms = recent(panel0)["atcf_id"].nunique()
 ```
 
 The recent era covers **`{python} int(n_storms)` storms** (seasons 2023–2026)
@@ -170,7 +170,7 @@ won't perfectly tie out in either direction.
 #| label: fig-grain-scatter
 #| code-fold: true
 #| fig-cap: "Per (storm, country, threshold): the national MAX vs the sum of the per-adm1 MAXes (recent era). Points above the diagonal are country-storms where the subnational total overshoots the national number — about a third of them, and nearly all only marginally (the cloud hugs the diagonal)."
-KEY = ["storm_id", "iso3", "wind_speed_kt"]
+KEY = ["atcf_id", "iso3", "wind_speed_kt"]
 a0 = (R0[KT].groupby(KEY)
       .agg(adm0_max=("max_val", "max"), storm_name=("storm_name", "first"))
       .reset_index())
@@ -215,7 +215,7 @@ for ax, (sortcol, title, fmt) in zip(
     ax.barh(y, t.adm0_max / 1e6, color="#1b6ca8", alpha=0.9, height=0.5,
             label="adm0 MAX")
     ax.set_yticks(y)
-    ax.set_yticklabels([f"{r.storm_name.title()} {r.storm_id[-4:]} — {r.iso3} "
+    ax.set_yticklabels([f"{r.storm_name.title()} {r.atcf_id[-4:]} — {r.iso3} "
                         f"{int(r.wind_speed_kt)}kt" for r in t.itertuples()],
                        fontsize=8)
     for yi, r in zip(y, t.itertuples()):
@@ -395,12 +395,12 @@ so the operational subnational surface is three methodologies stitched together.
 #| code-fold: true
 #| fig-cap: "Alberto 2024 over Mexico, adm1 34kt: each state's three source values; the solid+outlined bar is the operational MAX. Across 24 states all three sources win somewhere — the displayed surface is a patchwork."
 d = R1[(R1.wind_speed_kt == 34) & (R1.max_val > 0) & (R1.n_positive >= 2)].copy()
-gg = d.groupby(["storm_id", "iso3"]).agg(
+gg = d.groupby(["atcf_id", "iso3"]).agg(
     units=("max_val", "size"), nwin=("max_source", "nunique"),
     ppl=("max_val", "sum"), name=("storm_name", "first")).reset_index()
 pick = gg[(gg.units >= 6) & (gg.nwin >= 2)].sort_values(
     ["nwin", "ppl"], ascending=False).iloc[0]
-sub = d[(d.storm_id == pick.storm_id) & (d.iso3 == pick.iso3)]
+sub = d[(d.atcf_id == pick.atcf_id) & (d.iso3 == pick.iso3)]
 sub = sub.sort_values("max_val", ascending=False).head(16).iloc[::-1]
 fig, ax = plt.subplots(figsize=(11, 7)); y = np.arange(len(sub)); h = 0.26
 for i, s in enumerate(SOURCES):
@@ -414,7 +414,7 @@ ax.set_yticks(y); ax.set_yticklabels([str(n)[:26] for n in sub.admin_name],
                                      fontsize=8.2)
 ax.set_xlabel("population exposed (thousands) — solid+outlined bar = the MAX source")
 ax.set_title(f"Frankenstein footprint: {pick['name'].title()} "
-             f"{pick.storm_id[-4:]} — {pick.iso3}, adm1 34kt "
+             f"{pick.atcf_id[-4:]} — {pick.iso3}, adm1 34kt "
              f"({int(pick.nwin)} sources win across {int(pick.units)} units)")
 ax.legend(frameon=False, fontsize=9, title="source (faded), MAX = solid")
 ax.grid(axis="y", visible=False)
