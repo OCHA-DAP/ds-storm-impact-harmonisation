@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.source_exposure import queries as q  # noqa: E402
 from src.source_exposure import style  # noqa: E402
 from src.source_exposure.workbook import (  # noqa: E402
+    MAX_SEASON,
     MIN_SEASON,
     _country_resolver,
     build_caveats,
@@ -44,7 +45,7 @@ def _readme_blocks(storms, adm0, adm1, caveats, generated):
         B("subtitle", "CHD vs GDACS vs ADAM — population exposure by storm, "
           "admin 0 & admin 1"),
         B("meta", f"OCHA Data Science Unit  ·  generated {generated}  ·  dev "
-          f"database  ·  NHC seasons {MIN_SEASON}–2026"),
+          f"database  ·  NHC seasons {MIN_SEASON}–{MAX_SEASON}"),
         B("gap", ""),
         B("h2", "What this workbook is"),
         B("body", "Three independent estimates of storm-driven population "
@@ -53,7 +54,8 @@ def _readme_blocks(storms, adm0, adm1, caveats, generated):
           "estimate."),
         B("gap", ""),
         B("h2", "Tabs"),
-        B("bullet", f"storms — every NHC storm from {MIN_SEASON} on "
+        B("bullet", f"storms — every NHC storm, seasons {MIN_SEASON}–"
+          f"{MAX_SEASON} "
           f"({len(storms)} storms): name, season, basin, GDACS/ADAM cross-ids, "
           f"which sources report exposure, which have the storm on record, and "
           f"a note (note_gdacs_adam) explaining every GDACS/ADAM gap. The storm "
@@ -118,8 +120,8 @@ _MONEY = ["chd_exposure", "gdacs_exposure", "adam_exposure"]
 def main():
     OUT.mkdir(exist_ok=True)
     engine = q.get_engine("dev")
-    aids = q.all_nhc_storms(engine, MIN_SEASON)["atcf_id"].tolist()
-    print(f"master storms (season>={MIN_SEASON}): {len(aids)}")
+    aids = q.all_nhc_storms(engine, MIN_SEASON, MAX_SEASON)["atcf_id"].tolist()
+    print(f"master storms ({MIN_SEASON}<=season<={MAX_SEASON}): {len(aids)}")
 
     chd_rep, gdacs_rep, adam_rep = q.storms_with_source_exposure(engine, aids)
     print(f"reported storms — chd:{len(chd_rep)} gdacs:{len(gdacs_rep)} "

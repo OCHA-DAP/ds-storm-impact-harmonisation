@@ -397,10 +397,14 @@ def storm_names(engine) -> pd.DataFrame:
     return pd.read_sql(sql, engine)
 
 
-def all_nhc_storms(engine, min_season: int = 2001) -> pd.DataFrame:
+def all_nhc_storms(
+    engine, min_season: int = 2001, max_season: int | None = None
+) -> pd.DataFrame:
     """Master storm list: every NHC storm from `min_season` on (the
     operational/exposure era; exposure data begins ~2001), even those with
-    no exposure. Left-joins the crosswalk for GDACS/ADAM ids.
+    no exposure. Left-joins the crosswalk for GDACS/ADAM ids. `max_season`
+    (inclusive) caps the range — e.g. exclude the in-progress season from
+    the historical workbook.
 
     Columns: atcf_id, storm_name, season, basin, gdacs_eventid, adam_eventid.
 
@@ -436,9 +440,13 @@ def all_nhc_storms(engine, min_season: int = 2001) -> pd.DataFrame:
             GROUP BY atcf_id
         ) ib ON ib.atcf_id = s.atcf_id
         WHERE s.season >= :min_season
+          AND (:max_season IS NULL OR s.season <= :max_season)
         ORDER BY s.season, s.atcf_id
     """)
-    return pd.read_sql(sql, engine, params={"min_season": min_season})
+    return pd.read_sql(
+        sql, engine,
+        params={"min_season": min_season, "max_season": max_season},
+    )
 
 
 def fm_names(engine, admin_level: int) -> pd.DataFrame:

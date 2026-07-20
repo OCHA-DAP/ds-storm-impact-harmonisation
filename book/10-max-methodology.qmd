@@ -131,7 +131,7 @@ def human(n):
 
 # ── build the panels once (live from the dev DB) ─────────────────────────────
 eng = q.get_engine("dev")
-aids = q.all_nhc_storms(eng, wb.MIN_SEASON)["atcf_id"].tolist()
+aids = q.all_nhc_storms(eng, wb.MIN_SEASON, wb.MAX_SEASON)["atcf_id"].tolist()
 _, gd_rep, ad_rep = q.storms_with_source_exposure(eng, aids)
 resolve = wb._country_resolver(eng)
 panel0 = wb.build_exposure(eng, 0, aids, gd_rep, ad_rep, resolve)

@@ -25,6 +25,7 @@ from src.source_exposure import queries as q
 from src.source_exposure import source_diagnostics as sd
 
 MIN_SEASON = 2001          # exposure era; widen toward 1954 for full catalog
+MAX_SEASON = 2025          # historical cut — exclude the in-progress season
 KEY = ["atcf_id", "iso3", "unit", "wind_speed_kt"]
 
 def _sources_label(chd: bool, gd: bool, ad: bool) -> str:
@@ -69,7 +70,7 @@ def build_exposure(engine, level: int, aids: list[str],
                   on=KEY, how="outer")
     )
 
-    meta = q.all_nhc_storms(engine, MIN_SEASON)[
+    meta = q.all_nhc_storms(engine, MIN_SEASON, MAX_SEASON)[
         ["atcf_id", "storm_name", "season"]]
     panel = panel.merge(meta, on="atcf_id", how="left")
 
@@ -245,7 +246,7 @@ def build_caveats(engine, resolve) -> pd.DataFrame:
 
 
 def build_storms_tab(engine, chd_rep, gdacs_rep, adam_rep) -> pd.DataFrame:
-    storms = q.all_nhc_storms(engine, MIN_SEASON)
+    storms = q.all_nhc_storms(engine, MIN_SEASON, MAX_SEASON)
     # has_*_exposure = the source produced EXPOSURE for this storm (NOT
     # "is in that database"). Every storm here is already an NHC/CHD-catalog
     # storm; this flag is False for storms that simply had no exposure footprint.
