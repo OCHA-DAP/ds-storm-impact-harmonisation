@@ -13,7 +13,6 @@ import json
 from pathlib import Path
 
 import geopandas as gpd
-import numpy as np
 import ocha_stratus as stratus
 import pandas as pd
 from sqlalchemy import bindparam, text

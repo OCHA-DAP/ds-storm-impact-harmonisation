@@ -43,6 +43,9 @@ jobs:
       - name: Checkout dashboard branch (site root)
         uses: actions/checkout@v7
         with:
+          # switch to `main` once PR #2 lands the dashboard there — this
+          # checkout fails (no deploy, last good site stays live) if the
+          # branch is deleted
           ref: gdacs-adam-data
           path: dashboard
 

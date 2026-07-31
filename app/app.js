@@ -66,8 +66,14 @@ const label = (a) => {
 const totalPop = () => {
   const c = country();
   if (c && c.pop) return c.pop;
+  // No population row for this country: fall back to the max historical
+  // exposure. Read the index directly — rankedRows() evaluates triggers,
+  // whose threshold default depends on totalPop() (infinite recursion).
   let mx = 0;
-  for (const r of rankedRows(Infinity)) mx = Math.max(mx, r.obsv || 0, r.fmax || 0);
+  for (const [, byWs] of IDX.byCountry.get(S.iso3) || new Map()) {
+    const f = byWs[S.ws];
+    if (f) mx = Math.max(mx, f.obsv || 0, f.fmax || 0);
+  }
   return Math.max(mx, 1e6);
 };
 
@@ -357,10 +363,12 @@ async function renderTrackMap() {
     }).addTo(trackMap);
   }
   trackMap.invalidateSize();
-  if (!cacheTracks[S.iso3]) {
-    cacheTracks[S.iso3] = fetch(`data/tracks/${S.iso3}.json`).then((r) => r.ok ? r.json() : {});
+  const iso3 = S.iso3;
+  if (!cacheTracks[iso3]) {
+    cacheTracks[iso3] = fetch(`data/tracks/${iso3}.json`).then((r) => r.ok ? r.json() : {});
   }
-  const tracks = await cacheTracks[S.iso3];
+  const tracks = await cacheTracks[iso3];
+  if (iso3 !== S.iso3) return; // stale async
   for (const l of trackLayers) trackMap.removeLayer(l);
   trackLayers = [];
   const rows = rankedRows(S.topN);
@@ -872,7 +880,22 @@ function wire() {
 }
 
 async function init() {
-  const core = await (await fetch("data/core.json")).json();
+  let core;
+  try {
+    const r = await fetch("data/core.json");
+    if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+    core = await r.json();
+  } catch (e) {
+    document.body.innerHTML =
+      `<main style="max-width:44rem;margin:4rem auto;font-family:system-ui">
+        <h1>Data failed to load</h1>
+        <p><code>data/core.json</code> could not be fetched (${e.message}).
+        If you are running locally, generate the data first with
+        <code>uv run python export_app_data.py</code>, then serve this
+        directory with any static server.</p>
+      </main>`;
+    return;
+  }
   S.core = core;
   S.years = core.record_years;
   buildIndexes(core);
