@@ -1,6 +1,6 @@
 title = "Storm Impact Harmonisation"
-blurb = """The full Quarto book: CERF prediction models, exposure-method \
-comparison, GDACS/NHC matching and source distribution."""
+blurb = """The full Quarto book: CERF prediction models, monitoring-pipeline \
+exploration, and the exposure-method comparison behind these tools."""
 url = "https://cyclonic-cerf-allocations.netlify.app"
 url_label = "netlify.app"
 order = 30
