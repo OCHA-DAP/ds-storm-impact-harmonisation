@@ -1,6 +1,0 @@
-title = "CERF Predictor"
-blurb = """Interactive model estimating CERF allocation likelihood from cyclone \
-population exposure. Marimo app on Azure App Service."""
-url = "https://chd-ds-seas5-viz-cerf-rr-ccfsbjb8e8abfgb6.eastus2-01.azurewebsites.net"
-url_label = "azure"
-order = 40

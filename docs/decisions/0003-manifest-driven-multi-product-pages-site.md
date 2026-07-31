@@ -33,8 +33,8 @@ coordinating, and without any risk of clobbering each other?
 * Several people must be able to add pages in the same period without merge conflicts.
 * A path collision must fail the build, not silently overwrite a page.
 * The pattern must be liftable into other OCHA-DAP repos with minimal editing.
-* Some products are hosted here; others (the Quarto book on Netlify, the CERF
-  predictor on Azure) are not, and must still be reachable from one index.
+* Some products are hosted here; others (the Quarto book on Netlify) are not, and
+  must still be reachable from one index.
 * Adding a page should not require understanding or editing GitHub Actions YAML.
 
 ## Considered Options
