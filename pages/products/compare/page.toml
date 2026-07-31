@@ -1,0 +1,9 @@
+title = "Storm Exposure Comparison"
+blurb = """CHD, GDACS and ADAM exposure per country and storm. Configurable wind \
+and population triggers, per-storm forecast evolution, and track-buffer maps."""
+path = "compare"
+order = 10
+
+[source]
+type = "repo"
+dir = "app"
