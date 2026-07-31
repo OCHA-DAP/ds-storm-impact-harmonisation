@@ -193,3 +193,9 @@ temp
 .venv
 app/data/
 
+
+# assembled Pages output (built by pages/_build/assemble.py)
+/site/
+
+# superpowers brainstorming scratch
+.superpowers/
