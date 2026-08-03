@@ -4,10 +4,11 @@
 
 name: Build and deploy Python app to Azure Web App - chd-pa-aa-fji-storms-app
 
+# Manual-dispatch only. This deploy was an experiment that last ran on
+# 2026-03-13 from the `usa-radii-exp` branch. The push trigger is removed so
+# the workflow no longer depends on a branch that is not on the critical path
+# (same reasoning as ADR 0004); the deploy is still available on demand.
 on:
-  push:
-    branches:
-      - usa-radii-exp
   workflow_dispatch:
 
 jobs:
@@ -39,7 +40,7 @@ jobs:
           name: python-app
           path: |
             .
-            !.venv/
+            !antenv/
 
       # 🚫 Opting Out of Oryx Build
       # If you prefer to disable the Oryx build process during deployment, follow these steps:
@@ -63,4 +64,4 @@ jobs:
         with:
           app-name: 'chd-pa-aa-fji-storms-app'
           slot-name: 'global-cyclones'
-          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_1707965EB49D4A408A2AFF505C36B5DC }}
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_B41296F0649749A08B2B31931138D4BF }}
