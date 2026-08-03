@@ -12,11 +12,19 @@ All datasets are stored in Azure Blob Storage (`projects` container, `dev` stage
 | ADAM exposure | `ds-cyclone-exposure/adam_historical_national_exposure.csv` | WFP ADAM national population exposure at 60/90/120 km/h wind thresholds |
 | GDACS exposure | `ds-cyclone-exposure/gdacs_historical_national_exposure.csv` | GDACS national population exposure at 34 kt/64 kt wind thresholds |
 
+External API and data-source reference notes live in [`docs/`](docs/README.md) —
+check there before re-crawling an API. Architecture decisions are in
+[`docs/decisions/`](docs/decisions/) (MADR).
+
 ## Project Structure
 
 ```
 ├── src/                 # Reusable source code
 │   └── datasets/        # Dataset-specific loading and wrangling modules
+├── book/                # Quarto book (analysis chapters)
+├── scripts/             # Pipelines, cache refreshers, scheduled jobs
+├── docs/                # External source reference notes + ADRs
+├── app/                 # Static JS exposure comparison app
 ├── artefacts/           # Exploratory scripts, notebooks, scratch work
 ├── pyproject.toml       # Project config (uv-managed)
 └── .env                 # Azure credentials (not tracked)
@@ -28,3 +36,29 @@ All datasets are stored in Azure Blob Storage (`projects` container, `dev` stage
 uv sync
 cp .env.example .env  # fill in Azure credentials
 ```
+
+## Apps
+
+- `app/` — **static JS storm exposure comparison app** (no Python at runtime,
+  no plotly). Compares CHD NHC-based exposure (fcastonly + obsv) against GDACS
+  and ADAM with a configurable trigger threshold (wind level + population),
+  live-updating sliders, country ranking, per-storm forecast evolution, and
+  per-issued-time track-buffer maps (Leaflet). Data is pre-exported to
+  `app/data/` (gitignored):
+
+  ```
+  uv run python export_app_data.py   # regenerate app/data/ from the DB
+  cd app && python3 -m http.server 8590   # or any static file server
+  ```
+
+- `adm0_exp_app.py` — marimo storm exposure map app (deployed to Azure).
+- `storm_impact_app.py` — marimo NHC storm impact app (track buffers, WSP).
+- `compare_exposure.py` — marimo CHD vs GDACS vs ADAM scatter comparison.
+
+## Scheduled jobs
+
+| Workflow | Cadence | What it does |
+|---|---|---|
+| `daily-gdacs-monitor-email.yml` | 6-hourly (03/09/15/21 UTC) | Renders and sends the GDACS storm monitor email via Listmonk |
+| `pdc-cyclone-poll.yml` | 3-hourly | Archives raw PDC cyclone responses to blob. PDC serves no archive and no track history, so missed polls are unrecoverable — see ADR 0005 |
+| `deploy-app.yml` | push / schedule | Exports app data and deploys the Pages site |

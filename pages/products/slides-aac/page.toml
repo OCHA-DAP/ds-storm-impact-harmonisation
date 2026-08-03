@@ -1,0 +1,12 @@
+title = "AAC Slide Deck"
+blurb = """Three sources, one number — a proposed basis for standardised \
+cross-agency monitoring. Presented to the Assessment and Analysis Cell."""
+path = "slides/aac"
+order = 20
+
+# The deck is a single self-contained reveal.js file (embed-resources: true),
+# rendered from artefacts/slides/aac_deck.qmd and copied here. Re-render with
+# `quarto render aac_deck.qmd` and copy the result over index.html.
+[source]
+type = "local"
+dir = "."
