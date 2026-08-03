@@ -28,6 +28,26 @@ All in Azure Blob Storage (`projects` container, `dev` stage):
 | ADAM exposure | `ds-cyclone-exposure/adam_historical_national_exposure.csv` |
 | GDACS exposure | `ds-cyclone-exposure/gdacs_historical_national_exposure.csv` |
 
+## External data-source reference — read before re-deriving anything
+
+**`docs/` holds verified notes on every external source this repo hits**, each with
+endpoints, gotchas, retrieval dates and reproduce-it commands. Check there before
+crawling an API or re-establishing a fact — several of these took a while to pin
+down. Index: [`docs/README.md`](docs/README.md).
+
+Most load-bearing for storm work:
+
+- [`docs/nhc_gis_archive.md`](docs/nhc_gis_archive.md) — NHC publishes every
+  archived advisory as shapefiles (wind-radii polygons, cones, watch/warning
+  segments), no auth. This is how you get *NHC's own* geometry rather than a
+  reconstruction.
+- [`docs/gdacs_adam_wind_footprint.md`](docs/gdacs_adam_wind_footprint.md) — why
+  GDACS reads ~2× CHD (max-radius circle vs quadrant polygon), **with the citable
+  JRC sources** and an explicit do-not-cite warning for the report that does *not*
+  support the claim.
+
+Architecture decisions live in [`docs/decisions/`](docs/decisions/) (MADR).
+
 ## Build & Dev Commands
 
 - **Install deps**: `uv sync`
@@ -52,6 +72,15 @@ table below marks it tracked.
 | `08-pdc-evaluation.qmd` | `scripts/cache_pdc_sinlaku.py` | `book/_cache/08-pdc-evaluation/` | **Yes** — 108K, via a `.gitignore` negation |
 | `11-pdc-2026-season.qmd` | `scripts/cache_pdc_dolphin.py` | `book/_cache/11-pdc-2026-season/` | **Yes** — 520K, via a `.gitignore` negation |
 
+**Blob caches** (full-dataset, stored in Azure): populated by `scripts/refresh_*.py` scripts and read via `stratus.load_parquet_from_blob()`.
+
+| Chapter / section | Refresh script | Blob path |
+|---|---|---|
+| `03-gdacs-realtime.qmd` § API Update Latency | `scripts/cache_adam_latency.py` | `ds-storm-impact-harmonisation/processed/adam_episode_latency.parquet` |
+| `03-gdacs-realtime.qmd` § API Update Latency | `scripts/cache_gdacs_latency.py` | `ds-storm-impact-harmonisation/processed/gdacs_gts_latency.parquet` |
+
+To refresh: `uv run python scripts/<script>.py`
+
 ## PDC cyclone capture
 
 `scripts/poll_pdc_cyclones.py` runs 3-hourly via
@@ -61,15 +90,6 @@ PDC serves no archive and no track history, so this record only exists going
 forward and missed polls are unrecoverable — see
 `docs/decisions/0005-capture-pdc-cyclones-without-integrating-them.md`.
 Parsing lives in `src/datasets/pdc.py`; reference in `docs/pdc_api.md`.
-
-**Blob caches** (full-dataset, stored in Azure): populated by `scripts/refresh_*.py` scripts and read via `stratus.load_parquet_from_blob()`.
-
-| Chapter / section | Refresh script | Blob path |
-|---|---|---|
-| `03-gdacs-realtime.qmd` § API Update Latency | `scripts/cache_adam_latency.py` | `ds-storm-impact-harmonisation/processed/adam_episode_latency.parquet` |
-| `03-gdacs-realtime.qmd` § API Update Latency | `scripts/cache_gdacs_latency.py` | `ds-storm-impact-harmonisation/processed/gdacs_gts_latency.parquet` |
-
-To refresh: `uv run python scripts/<script>.py`
 
 ## ocha_stratus — Azure Blob & Database Access
 

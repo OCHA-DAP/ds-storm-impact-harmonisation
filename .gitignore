@@ -1,5 +1,6 @@
 .env
 .claude/
+.superpowers/
 book/_output/
 book/_freeze/
 book/_cache/*

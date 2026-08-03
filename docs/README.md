@@ -1,9 +1,12 @@
 # API & data-source reference
 
-Permanent reference for the external APIs and data sources that feed the CERF
-allocation predictor (`app/cerf_predictor.py`) and chapter 02c. Verified
-against live endpoints 2026-04-27. If you come back to this in 6 months,
-re-verify before relying on edge cases — APIs drift.
+Permanent reference for the external APIs and data sources this repo depends on.
+Verified against live endpoints on the dates noted in each file. If you come back
+to this in 6 months, re-verify before relying on edge cases — APIs drift.
+
+## CERF allocation predictor
+
+Sources feeding `app/cerf_predictor.py` and chapter 02c. Verified 2026-04-27.
 
 | Source | What it gives us | Doc |
 |---|---|---|
@@ -12,6 +15,16 @@ re-verify before relying on edge cases — APIs drift.
 | **CERF GMS API** | All CERF allocations + projects (XML/JSON) | [`cerf_gms_api.md`](cerf_gms_api.md) |
 | **FTS / HPC API** | HRP requirements + funding flows | [`fts_hpc_api.md`](fts_hpc_api.md) |
 | **3RM v1.8 spreadsheet** (on blob) | Static, frozen training set | this file, below |
+
+## Storm exposure sources
+
+Behind the three-source comparison (chapters 09–10) and the AAC deck.
+
+| Source | What it gives us | Doc |
+|---|---|---|
+| **NHC GIS archive** | Per-advisory wind-radii polygons, cones, watch/warning segments — NHC's own geometry, no auth | [`nhc_gis_archive.md`](nhc_gis_archive.md) |
+| **GDACS / ADAM footprint method** | Why GDACS reads systematically higher than CHD: max-radius circle vs quadrant polygon, **with citable sources** | [`gdacs_adam_wind_footprint.md`](gdacs_adam_wind_footprint.md) |
+| **PDC Hazards API** | Candidate third exposure source. Evaluated ch. 08, re-evaluated on the 2026 season ch. 11; captured 3-hourly but not integrated (ADR 0005) | [`pdc_api.md`](pdc_api.md) |
 
 ## Data flow into the predictor
 
