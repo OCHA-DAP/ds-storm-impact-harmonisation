@@ -209,6 +209,67 @@ behind them is undocumented — the payload hints at TAOS via a
 `taosArchive` field. Mapping a band to a wind speed would be a guess,
 and this chapter does not make one.
 
+### The bands are also split by country
+
+`exposureLevels[].data` carries its own nested `totalByCountry`, so
+exposure is available per (country, band) rather than only as one
+national number:
+
+```{python}
+#| label: tbl-band-country
+#| echo: false
+rows = []
+exposure_data = (dolphin.get("exposure") or {}).get("data") or {}
+for lv in exposure_data.get("exposureLevels") or []:
+    for e in (lv.get("data") or {}).get("totalByCountry") or []:
+        pop = ((e.get("population") or {}).get("total") or {}).get("value", 0)
+        rows.append(
+            {
+                "Band": lv.get("level"),
+                "Description": lv.get("exposureDescription"),
+                "Country": e.get("country"),
+                "Population": f"{pop:,.0f}",
+            }
+        )
+pd.DataFrame(rows).style.hide(axis="index")
+```
+
+That makes PDC's exposure grain **country × damage band** — the
+structural analogue of GDACS's `pop_34kt`/`pop_64kt` and ADAM's
+60/90/120 km/h bands, keyed on expected damage instead of wind speed.
+
+### But there is no sub-national breakdown
+
+The detail object has a `totalByAdmin` array with `admin1` and `admin2`
+slots, which reads like a sub-national breakdown. It is not one. Those
+fields are never populated, and the array duplicates `totalByCountry`.
+
+We tested this against the whole live feed on 2026-08-03 — 974 hazards
+across 21 types, sampling up to three per type so that **every type was
+covered**, 57 hazards fetched in total:
+
+| | |
+|---|---|
+| Hazards with any exposure rows | 54 / 57 |
+| With a non-null `admin1` or `admin2` | **0** |
+| Where `totalByAdmin` differed from `totalByCountry` | **0 of 54** — identical countries *and* values |
+
+This is not a cyclone-specific gap: the sample spans wildfire, flood,
+earthquake, volcano, extreme temperature and conflict.
+
+What it does not establish is *why*. The published PDF documents
+`totalByAdmin` as an admin breakdown and the fields are structurally
+present, which fits either "not computed" or "not exposed at our API
+tier" equally well. Our test cannot separate those, and it is the
+single most consequential thing to ask PDC.
+
+The consequence either way is that **PDC is adm0-only** for this book's
+purposes. It cannot participate in the `adm0 = Σ adm1` conservation
+check of [ADR 0002](../docs/decisions/0002-admin-level-conservation-of-source-exposure.md),
+and any plan that needs PDC sub-nationally is blocked on that answer.
+Its only sub-national-ish axis is the damage bands above, which slice
+by severity rather than geography.
+
 ## The structural limitation is real, and different from what we thought
 
 Chapter 08 identified the absence of an archive as disqualifying. That

@@ -309,7 +309,7 @@ Top-level keys under `exposure.data`:
 | `population` | Aggregate population impact (not per-country) |
 | `capital` | Aggregate capital impact `{total, school, hospital}` |
 | `totalByCountry` | **Per-country breakdown — array, the join target for harmonisation** |
-| `totalByAdmin` | Admin-level breakdown — same shape as `totalByCountry` |
+| `totalByAdmin` | **Not an admin breakdown despite the name** — a duplicate of `totalByCountry`; see [No sub-national exposure](#no-sub-national-exposure) |
 | `exposureLevels` | Severity buckets — `[{level, exposureDescription, data}]` |
 | `foodNeeds` / `waterNeeds` / `wasteNeeds` / `shelterNeeds` | Aggregate humanitarian-needs estimates with units |
 
@@ -364,9 +364,10 @@ so this comes from the Puerto Rico flood `9175d060-…` for a populated example:
 
 **`country` is ISO3** — direct join with our existing GDACS/CERF tables. ✓
 
-`totalByAdmin[]` has the same shape plus populated `admin1`/`admin2` for
-sub-national aggregates (Puerto Rico flood has admin1/admin2 null because
-the storm covers a single admin0 only).
+`totalByAdmin[]` has the same shape with `admin1`/`admin2` slots, but see
+[No sub-national exposure](#no-sub-national-exposure) below — they are never
+populated, and the guess made here originally (that the Puerto Rico flood's
+nulls were because it covered a single admin0) is wrong.
 
 **`exposureLevels` shape:**
 
@@ -624,6 +625,58 @@ legitimate: it was post-tropical and offshore in the East Pacific. So
 the April "exposure compute may be broken" concern was a manual-entry
 artifact, not a general defect.
 
+### Population by country × damage band
+
+`exposureLevels[].data` carries its **own nested `totalByCountry`**, so
+exposure is available per (country, band) and not only as a single
+national total. Dolphin:
+
+| band | description | JPN |
+|---|---|---|
+| 1 | Minor Damage; power out | 17,100 |
+| 2 | Moderate Damage; 5% of value | 834,000 |
+| 3 | Widespread Damage and Above | 577,000 |
+
+Bavi's three countries all sit in a single band (level 2: CHN 379,000,000,
+TWN 17,800,000, JPN 1,730), where the per-band rows equal the national
+totals exactly.
+
+This is the structural analogue of GDACS's `pop_34kt`/`pop_64kt` and
+ADAM's 60/90/120 km/h bands — same idea, keyed on expected damage rather
+than wind speed. **PDC's exposure grain is country × damage band.**
+
+### No sub-national exposure
+
+**PDC does not provide admin1/admin2 exposure.** `totalByAdmin` exists and
+has `admin1`/`admin2` slots, but they are never populated, and the array
+is a duplicate of `totalByCountry`.
+
+Tested 2026-08-03 against the live feed (974 hazards across 21 types),
+sampling up to 3 per type — **all 21 types covered**, 57 hazards fetched:
+
+| | |
+|---|---|
+| Hazards with any exposure rows | 54 / 57 |
+| With non-null `admin1` or `admin2` | **0** |
+| Where `totalByAdmin` differed from `totalByCountry` | **0 of 54** (identical countries *and* values) |
+
+That spans wildfire, flood, earthquake, volcano, extreme temperature,
+conflict and the rest — not a cyclone-specific limitation.
+
+**What this does not establish** is whether admin-level data exists but is
+not exposed to our API key. The published PDF documents `totalByAdmin` as
+an admin breakdown and the field is structurally present, which is
+consistent with either "not computed" or "not entitled at this tier". The
+test cannot separate those.
+
+**Consequence:** PDC is adm0-only for harmonisation. It cannot take part
+in the `adm0 = Σ adm1` conservation check of ADR 0002 at all. Its only
+sub-national-ish axis is the damage bands above, which slice by severity
+rather than geography.
+
+Reproduce: for each hazard, `GET /hazards/{uuid}` and compare
+`exposure.data.totalByAdmin` against `exposure.data.totalByCountry`.
+
 ### Same bulletin as GDACS
 
 At advisory 31 PDC and GDACS agreed **exactly** on position
@@ -654,6 +707,20 @@ Still unobserved: everything landfall-related (`landfallAdmin0`,
 `landfallTime`, `hoursLandfall`, `categoryLandfall`,
 `distanceLandfallK`), and multi-country `totalByCountry` for an
 automated cyclone.
+
+### The sharpest question for PDC
+
+Chapter 08 noted an outreach to PDC. If it happens, this is the question
+with the most riding on it, and it is more concrete than any of the
+original eight:
+
+> Is `totalByAdmin` ever populated below admin0 — and if so, under what
+> conditions or entitlement? In 54 of 54 sampled hazards carrying
+> exposure, across all 21 hazard types in the live feed, `totalByAdmin`
+> was byte-equivalent to `totalByCountry` with `admin1`/`admin2` null.
+
+A yes unlocks PDC for sub-national comparison work. A no closes the
+question permanently and fixes PDC's ceiling at adm0.
 
 ## Integration target: existing ADAM and GDACS exposure schemas
 
