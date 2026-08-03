@@ -1,0 +1,374 @@
+"""
+PDC Hazards API — parsing of captured cyclone records.
+
+Reads the raw responses archived by `scripts/poll_pdc_cyclones.py` and turns
+them into frames shaped like the GDACS equivalents in `gdacs.py`, so the two
+sources can be compared directly.
+
+This module deliberately does **no** fetching beyond blob reads. PDC serves no
+archive and no track history, so the only PDC data we will ever have is what
+the poller captured at the time; parsing is kept separate from capture so that
+changing the parse never requires re-fetching something unre-fetchable.
+
+Reference for the API and its schema traps: `docs/pdc_api.md`.
+
+Layout produced by the poller (container=`projects`)::
+
+    ds-storm-impact-harmonisation/raw/pdc/cyclones/
+        polls/<poll_ts>/_list.json
+        hazards/<hazard_uuid>/<updatedAt>.json
+
+Schema traps handled here
+-------------------------
+- **Avro union envelopes.** Many scalars arrive as ``{"string": v}`` /
+  ``{"long": v}``; inside ``incident.snapshot.properties.map`` every value is
+  wrapped. :func:`unwrap` normalises these recursively.
+- **Two different uuids.** The detail object's top-level ``uuid`` is a
+  state/version ID that changes on update. The stable key is ``hazard.uuid``.
+- **Wind-radius index is not the threshold.** ``rad1`` is 64 kt and ``rad3`` is
+  34 kt; the threshold lives in ``rad<N>SpdKt``. :func:`parse_track` keys the
+  output on the actual knot value so downstream code never relies on the index.
+- **Sentinel end date.** ``endedAt = 32503679999`` (2999-12-31) means "still
+  active", not a real timestamp.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import ocha_stratus as stratus
+import pandas as pd
+
+BLOB_PREFIX = "ds-storm-impact-harmonisation/raw/pdc/cyclones"
+CONTAINER = "projects"
+
+#: `endedAt` value PDC uses to mean "still active" (2999-12-31T23:59:59Z).
+ACTIVE_SENTINEL = 32503679999
+
+_AVRO_KEYS = {"string", "long", "int", "double", "float", "boolean", "array"}
+
+#: Quadrants, in the order ATCF reports them.
+_QUADRANTS = ["Ne", "Se", "Sw", "Nw"]
+
+#: Columns :func:`parse_track` always emits. Radius columns are added
+#: per-record, since which thresholds are reported varies by storm.
+_TRACK_BASE_COLS = [
+    "atcf_id",
+    "position_no",
+    "valid_time",
+    "longitude",
+    "latitude",
+    "max_winds_kt",
+    "gusts_kt",
+    "speed_kt",
+    "dir_deg",
+    "saffir_simpson",
+]
+
+
+def unwrap(obj: Any) -> Any:
+    """Recursively strip Avro union envelopes such as ``{"string": v}``.
+
+    A dict with exactly one key drawn from the Avro scalar/array type names is
+    treated as an envelope and replaced by its value. Everything else is
+    traversed unchanged.
+    """
+    if isinstance(obj, dict):
+        if len(obj) == 1:
+            (key,), (val,) = obj.keys(), obj.values()
+            if key in _AVRO_KEYS:
+                return unwrap(val)
+        return {k: unwrap(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [unwrap(v) for v in obj]
+    return obj
+
+
+# --------------------------------------------------------------------------
+# Loading captured records
+# --------------------------------------------------------------------------
+
+
+def list_captured_versions(stage: str = "dev") -> pd.DataFrame:
+    """List every captured hazard version.
+
+    Returns
+    -------
+    DataFrame with columns ``hazard_uuid``, ``updated_at`` (int epoch
+    seconds) and ``blob``, sorted by hazard then time.
+    """
+    rows = []
+    for blob in stratus.list_container_blobs(
+        name_starts_with=f"{BLOB_PREFIX}/hazards/", stage=stage
+    ):
+        if not blob.endswith(".json"):
+            continue
+        parts = blob.split("/")
+        rows.append(
+            {
+                "hazard_uuid": parts[-2],
+                "updated_at": int(parts[-1].removesuffix(".json")),
+                "blob": blob,
+            }
+        )
+    df = pd.DataFrame(rows, columns=["hazard_uuid", "updated_at", "blob"])
+    return df.sort_values(["hazard_uuid", "updated_at"]).reset_index(drop=True)
+
+
+def load_version(blob: str, stage: str = "dev") -> dict:
+    """Load one captured detail object, Avro-unwrapped."""
+    raw = stratus.load_blob_data(blob, stage=stage, container_name=CONTAINER)
+    return unwrap(json.loads(raw))
+
+
+def load_latest(hazard_uuid: str, stage: str = "dev") -> dict:
+    """Load the most recently captured version of one hazard."""
+    versions = list_captured_versions(stage=stage)
+    versions = versions[versions["hazard_uuid"] == hazard_uuid]
+    if versions.empty:
+        raise KeyError(f"no captured versions for hazard {hazard_uuid}")
+    return load_version(versions.iloc[-1]["blob"], stage=stage)
+
+
+# --------------------------------------------------------------------------
+# Parsing
+# --------------------------------------------------------------------------
+
+
+def _incident_map(detail: dict) -> dict:
+    """The flat key/value snapshot under ``incident.snapshot.properties.map``."""
+    return (
+        detail.get("incident", {})
+        .get("snapshot", {})
+        .get("properties", {})
+        .get("map", {})
+    ) or {}
+
+
+def parse_meta(detail: dict) -> dict:
+    """Extract identity and provenance from a detail object.
+
+    ``atcf_id`` is the join key to IBTrACS and is present only for
+    automatically-ingested cyclones; manual entries
+    (``source_name = "PDC Manual Hazard"``) carry a PDC-internal UUID in
+    ``incident.sourceRecordId`` instead, and no ATCF ID.
+    """
+    hazard = detail.get("hazard", {}) or {}
+    incident = detail.get("incident", {}) or {}
+    m = _incident_map(detail)
+    ended = hazard.get("endedAt")
+    names = detail.get("name") or []
+    return {
+        "hazard_uuid": hazard.get("uuid"),
+        "name": names[0]["value"] if names else None,
+        "category": detail.get("category"),
+        "severity": detail.get("severity"),
+        "creator": hazard.get("creator"),
+        "started_at": hazard.get("startedAt"),
+        "updated_at": hazard.get("updatedAt"),
+        "ended_at": ended,
+        # PDC uses endedAt three ways: the sentinel ("no end set"), a real
+        # past time, and a *projected* future end. Typhoon Dolphin was very
+        # much active with endedAt set to the next day, so "active" cannot be
+        # read off the sentinel alone. Report the fact; let callers decide
+        # activity against whatever reference time they care about.
+        "end_is_sentinel": ended == ACTIVE_SENTINEL,
+        # Provenance: distinguishes auto-ingested from analyst-entered.
+        "source": m.get("source"),
+        "source_name": m.get("sourceName"),
+        "issuer": m.get("issuer"),
+        "source_record_id": incident.get("sourceRecordId"),
+        "atcf_id": m.get("atcfId"),
+        "advisory_num": m.get("advisoryNum"),
+        "storm_status": m.get("stormStatus"),
+        "saffir_simpson": m.get("saffirSimpson"),
+        "max_winds_kph": m.get("maxWindsKph"),
+        "pressure": m.get("pressure"),
+        "region": m.get("region"),
+        "landfall_admin0": m.get("landfallAdmin0"),
+        "landfall_time": m.get("landfallTime"),
+    }
+
+
+def parse_track(detail: dict) -> pd.DataFrame:
+    """Forecast positions with quadrant wind radii.
+
+    One row per ``type="position"`` feature. Note this is **forecast only** —
+    PDC carries no past track, so the earliest row is the advisory's own
+    synoptic hour. Reconstructing a full track means stacking this across
+    successive captures.
+
+    Radii columns are named by their actual knot threshold
+    (``r34_ne_nm`` … ``r64_nw_nm``) rather than PDC's ``rad1/2/3`` index,
+    because the index order is 64/50/34 kt and inverting it silently would be
+    an easy and expensive mistake.
+    """
+    feats = (detail.get("features", {}) or {}).get("geoJson", {}) or {}
+    rows = []
+    for feat in feats.get("features", []) or []:
+        props = feat.get("properties") or {}
+        if props.get("type") != "position":
+            continue
+        lon, lat = feat["geometry"]["coordinates"][:2]
+        row = {
+            "atcf_id": props.get("atcfId"),
+            "position_no": _as_int(props.get("positionNo")),
+            "valid_time": _as_ts(props.get("forecastDateUserPref")),
+            "longitude": lon,
+            "latitude": lat,
+            "max_winds_kt": _as_float(props.get("maxWindsKt")),
+            "gusts_kt": _as_float(props.get("gustsKt")),
+            "speed_kt": _as_float(props.get("speedKt")),
+            "dir_deg": _as_float(props.get("dirDeg")),
+            "saffir_simpson": props.get("saffirSimpson"),
+        }
+        # rad1/rad2/rad3 -> resolve each to its own reported kt threshold.
+        for idx in (1, 2, 3):
+            kt = _as_int(props.get(f"rad{idx}SpdKt"))
+            if kt is None:
+                continue
+            for quad in _QUADRANTS:
+                row[f"r{kt}_{quad.lower()}_nm"] = _as_float(
+                    props.get(f"rad{idx}{quad}Nm")
+                )
+        rows.append(row)
+    if not rows:
+        # Manual RESPONSE entries carry an incident Point but no forecast
+        # positions, so an empty track is an ordinary outcome rather than an
+        # error. Return the schema so callers can concat without special-casing.
+        return pd.DataFrame(columns=_TRACK_BASE_COLS)
+    return pd.DataFrame(rows).sort_values("position_no").reset_index(drop=True)
+
+
+def parse_exposure(detail: dict) -> pd.DataFrame:
+    """Per-country population and capital exposure.
+
+    One row per country in ``exposure.data.totalByCountry``. ``country`` is
+    ISO3, so this joins directly to the GDACS and CERF tables. Returns an
+    empty frame when PDC computed no exposure (offshore storms, and manual
+    entries where the compute never ran).
+    """
+    data = (detail.get("exposure", {}) or {}).get("data", {}) or {}
+    rows = []
+    for entry in data.get("totalByCountry") or []:
+        pop = entry.get("population", {}) or {}
+        cap = entry.get("capital", {}) or {}
+        rows.append(
+            {
+                "iso3": entry.get("country"),
+                "admin0": entry.get("admin0"),
+                "pop_total": _value(pop.get("total")),
+                "pop_0_14": _value(pop.get("total0_14")),
+                "pop_15_64": _value(pop.get("total15_64")),
+                "pop_65_plus": _value(pop.get("total65_Plus")),
+                "pop_vulnerable": _value(pop.get("vulnerable")),
+                "households": _value(pop.get("households")),
+                "capital_total": _value(cap.get("total")),
+                "capital_school": _value(cap.get("school")),
+                "capital_hospital": _value(cap.get("hospital")),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def parse_exposure_bands(detail: dict) -> pd.DataFrame:
+    """Damage-band exposure from ``exposure.data.exposureLevels``.
+
+    One row per band. Bands appear to be **discrete** (they sum to the
+    reported total, like ADAM's 60/90/120 km/h bands) rather than cumulative
+    (like GDACS's ``pop_34kt``/``pop_64kt``) — confirmed on Typhoon Dolphin
+    only, so treat as provisional.
+
+    PDC labels these by expected damage ("Moderate Damage; 5% of value"), not
+    by wind threshold, and the underlying model is not documented. Mapping a
+    band to a wind speed is therefore an open question, not something this
+    function should guess at.
+    """
+    data = (detail.get("exposure", {}) or {}).get("data", {}) or {}
+    rows = []
+    for level in data.get("exposureLevels") or []:
+        pop = (level.get("data") or {}).get("population") or {}
+        rows.append(
+            {
+                "level": level.get("level"),
+                "description": level.get("exposureDescription"),
+                "pop_total": _value(pop.get("total")),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+# --------------------------------------------------------------------------
+# IBTrACS join
+# --------------------------------------------------------------------------
+
+
+def load_ibtracs_atcf_lookup(url: str | None = None) -> pd.DataFrame:
+    """IBTrACS lookup keyed on ATCF ID.
+
+    PDC reports the forecast centre's ATCF ID directly (``WP122026``), which
+    IBTrACS carries as ``USA_ATCF_ID``. That makes this an exact join —
+    unlike the GDACS path, which has to match on name plus season and needs a
+    hand-maintained exceptions list (see ``gdacs.match_gdacs_to_ibtracs``).
+
+    Returns one row per storm: ``sid``, ``atcf_id``, ``name``, ``season``,
+    ``basin``.
+    """
+    from src.datasets.gdacs import IBTRACS_LAST3_URL
+
+    df = pd.read_csv(url or IBTRACS_LAST3_URL, skiprows=[1], low_memory=False)
+    keep = ["SID", "USA_ATCF_ID", "NAME", "SEASON", "BASIN"]
+    lookup = df.groupby("SID").first()[keep[1:]].reset_index()
+    lookup.columns = ["sid", "atcf_id", "name", "season", "basin"]
+    lookup["atcf_id"] = lookup["atcf_id"].astype(str).str.strip().str.upper()
+    lookup["name"] = lookup["name"].str.upper().str.strip()
+    return lookup[lookup["atcf_id"].ne("") & lookup["atcf_id"].ne("NAN")]
+
+
+def match_atcf_to_sid(atcf_id: str, ibtracs: pd.DataFrame | None = None) -> str | None:
+    """Resolve a PDC ``atcfId`` to an IBTrACS SID, or None if absent.
+
+    A live storm legitimately has no SID yet: IBTrACS lags real time, so
+    None here means "not in IBTrACS yet", not "no match exists".
+    """
+    if not atcf_id:
+        return None
+    if ibtracs is None:
+        ibtracs = load_ibtracs_atcf_lookup()
+    hit = ibtracs[ibtracs["atcf_id"] == str(atcf_id).strip().upper()]
+    return None if hit.empty else hit.iloc[0]["sid"]
+
+
+# --------------------------------------------------------------------------
+# Small coercion helpers
+#
+# PDC returns most numerics as strings inside the GeoJSON feature properties,
+# and occasionally omits them, so every conversion has to tolerate both.
+# --------------------------------------------------------------------------
+
+
+def _value(node: Any) -> float | None:
+    """Pull ``.value`` out of PDC's {value, valueFormatted, ...} quad."""
+    if isinstance(node, dict):
+        return node.get("value")
+    return node
+
+
+def _as_float(v: Any) -> float | None:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_int(v: Any) -> int | None:
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_ts(v: Any) -> pd.Timestamp | None:
+    ts = pd.to_datetime(v, errors="coerce", utc=True)
+    return None if pd.isna(ts) else ts
