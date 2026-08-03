@@ -45,11 +45,28 @@ def get_active_cyclones(
     Parameters
     ----------
     alert_levels : list of {"green", "orange", "red"}, optional
-        Filter by alert level. Default: all levels.
+        Filter by alert level.
+
+        **Leaving this unset does NOT return all levels.** When the
+        `alertlevel` parameter is omitted, GDACS returns orange and red
+        events only; green events are silently excluded. Pass
+        ``["green", "orange", "red"]`` explicitly to get everything.
+
+        Alert level scores GDACS's own impact estimate, not storm
+        intensity, so a green event can be a Category 2 typhoon with
+        over a million people exposed (DOLPHIN-26, August 2026). For a
+        30-day window on 2026-08-03 the omitted-parameter call returned
+        3 events and none current, while the explicit all-levels call
+        returned 8 including both active storms.
+
+        The default is left as-is because several callers do want the
+        orange/red subset. Be deliberate about which you want.
     from_date, to_date : str "YYYY-MM-DD", optional
         Date range filter. Default: GDACS default (recent events).
     limit : int
-        Max results (GDACS caps at 100 per page).
+        Max results (GDACS caps at 100 per page). There is no pagination,
+        so a result of exactly `limit` rows is probably truncated; narrow
+        the date window rather than raising this.
 
     Returns
     -------

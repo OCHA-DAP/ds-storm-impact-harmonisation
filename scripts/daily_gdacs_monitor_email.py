@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -54,6 +54,21 @@ TEST_PREFIX = "[test] "  # Prefixed onto BOTH the campaign name and the
                          # dedicated inbox folder. Drop to "" for prod.
 DRY_RUN_DIR = Path(__file__).parent.parent / "artefacts" / "daily_email_previews"
 
+# GDACS returns orange+red ONLY when the alertlevel parameter is omitted, so
+# this must be stated explicitly or green events never reach the email. Alert
+# level scores GDACS's own impact estimate rather than storm intensity, so
+# green is not "minor": on 2026-08-03 both currently-active storms were green,
+# one a Category 2 typhoon with 1.3M exposed in Japan, and this email reported
+# no active storms at all.
+ALERT_LEVELS_ALL = ["green", "orange", "red"]
+
+# Bound the query by date rather than taking GDACS's unfiltered default. With
+# all three alert levels the unfiltered call returns exactly 100 events — the
+# per-page cap, with no pagination available — so it is silently truncated. A
+# 30-day window stays well under the cap and cannot miss a currently-active
+# storm, whose start date is necessarily recent.
+LOOKBACK_DAYS = 30
+
 
 # ---------------------------------------------------------------------------
 # Fetch live exposure for the active storms
@@ -65,7 +80,18 @@ def fetch_active_exposure() -> tuple[pd.DataFrame, pd.DataFrame]:
 
     exposure_long_df has one row per (eventid, iso3, buffer) tuple.
     """
-    events = get_active_cyclones()
+    now = datetime.now(timezone.utc)
+    events = get_active_cyclones(
+        alert_levels=ALERT_LEVELS_ALL,
+        from_date=(now - timedelta(days=LOOKBACK_DAYS)).strftime("%Y-%m-%d"),
+        to_date=now.strftime("%Y-%m-%d"),
+    )
+    if len(events) == 100:
+        print(
+            "  WARN GDACS returned exactly 100 events (the page cap);"
+            " result is probably truncated — narrow LOOKBACK_DAYS.",
+            flush=True,
+        )
     if events.empty:
         return pd.DataFrame(), pd.DataFrame()
     active = events[events["is_current"]].reset_index(drop=True)
