@@ -26,6 +26,7 @@ book:
         - 04-nhc-wsp-exploration.qmd
         - 05-gdacs-nhc-matching.qmd
         - 08-pdc-evaluation.qmd
+        - 11-pdc-2026-season.qmd
     - part: "Exposure Method Comparison"
       chapters:
         - 09-source-comparison.qmd

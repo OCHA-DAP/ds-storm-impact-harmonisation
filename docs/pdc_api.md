@@ -527,6 +527,134 @@ Replaces / supersedes the implications above this section.
 5. **Use `hazard.uuid` (not the top-level `uuid`) as the stable event key.**
    Top-level `uuid` is a state/version ID and changes with updates.
 
+## Automatically-ingested cyclones (2026 season)
+
+Probed **2026-08-03**, when the feed held three cyclones — the first
+`category = EVENT` cyclones we have seen. **Where this section and the
+April "Schema after live exploration" section disagree about cyclones,
+trust this one**: April's only sample was a manual entry and does not
+generalise. Analysis in `book/11-pdc-2026-season.qmd`; snapshot pinned in
+`book/_cache/11-pdc-2026-season/`.
+
+| | Dolphin | Genevieve | Bavi |
+|---|---|---|---|
+| uuid | `d0345bd1-…` | `05dc1097-…` | `290c2172-…` |
+| `category` | `EVENT` | `EVENT` | `RESPONSE` |
+| `incident.sourceId` | 45 | 30 | 3000 |
+| `map.source` | `cyclone_jtwc` | `cyclone_nhc` | (manual) |
+| `map.issuer` | JTWC | NHC | — |
+| `sourceRecordId` | `WP122026` | `EP072026` | internal UUID |
+| detail size | 270 KB | 77 KB | 89 KB |
+
+### Two ingestion paths, distinguished by `incident.sourceId`
+
+`sourceId = 3000` is `"PDC Manual Hazard"` (analyst-entered, the Sinlaku
+and Bavi case). Other `sourceId` values are automated feeds from official
+forecast centres. **`category` correlates**: automated cyclones are
+`EVENT`, manual ones `RESPONSE`. Treat the `RESPONSE` tier as unfit for
+quantitative use — Bavi reports 396.8M exposed at a single coarse band,
+was last updated three weeks before capture, and still carries the
+active sentinel.
+
+### `atcfId` — the IBTrACS join, resolved
+
+Automated cyclones carry the forecast centre's ATCF ID in **both**
+`incident.sourceRecordId` and `incident.snapshot.properties.map.atcfId`.
+This joins exactly to IBTrACS `USA_ATCF_ID` (`WP122026` →
+`2026208N13178`, `EP072026` → `2026204N08267`), including for UNNAMED
+storms. Implemented as `pdc.match_atcf_to_sid()`. Manual entries have no
+ATCF ID.
+
+### `features.geoJson` — the cyclone track
+
+For automated cyclones this *is* a track, contrary to what Sinlaku
+suggested. Dolphin returned 46 features in three flavours, keyed on
+`properties.type`:
+
+| `type` | Geometry | Contents |
+|---|---|---|
+| `position` | Point | Forecast position: lat/lon, `maxWindsKt`, gusts, `saffirSimpson`, `forecastDateUserPref`, **quadrant wind radii** |
+| `segment` | LineString | Track leg between positions, with `maxWindsKt`/`saffirSimpson` |
+| `cone` | Polygon | Forecast cone per `forecastPeriodHour`, with `coneSource` (e.g. `JTWC`) |
+
+**Wind radii trap: the index is not the threshold.** Each `position`
+carries `rad1`/`rad2`/`rad3` with quadrant values (`rad<N>NeNm`, `SeNm`,
+`SwNm`, `NwNm`) — but the order is **64 / 50 / 34 kt**, with the actual
+threshold in `rad<N>SpdKt`. Always read the threshold; never assume
+`rad1` is 34 kt. `pdc.parse_track()` emits `r34_*`/`r50_*`/`r64_*`
+columns keyed on the reported knot value for exactly this reason.
+
+### Forecast-only: there is no track history
+
+**A cyclone detail object contains no past track.** Dolphin at advisory
+31 (formed 27 July) returned nine positions, the earliest being the
+current synoptic hour; advisories 1-30 appear nowhere. GDACS, queried at
+the same moment, returned all 31 actual advisories.
+
+This is more restrictive than "no archive". A PDC storm history cannot
+be backfilled even for a storm currently in the feed — it can only be
+accumulated forward by polling, which is why
+`scripts/poll_pdc_cyclones.py` runs 3-hourly.
+
+Detail lookups do outlive the list, though: `GET /hazards/{uuid}` still
+returned Sinlaku and the Puerto Rico flood on 2026-08-03, over three
+months after both dropped out of `/hazards`. So the perishable thing is
+**discovery** (uuids), not the payload. Do not rely on this as a
+retention guarantee.
+
+### Exposure for a live cyclone
+
+Dolphin: `totalByCountry` = one row, `JPN`, `population.total.value` =
+1,420,000. `exposureLevels` has **three discrete bands** that sum to
+1,428,100 — equal within PDC's rounding, so bands are discrete like
+ADAM's, not cumulative like GDACS's `pop_34kt`/`pop_64kt`:
+
+| `level` | `exposureDescription` | population |
+|---|---|---|
+| 1 | Minor Damage; power out | 17,100 |
+| 2 | Moderate Damage; 5% of value | 834,000 |
+| 3 | Widespread Damage and Above | 577,000 |
+
+Bands are labelled by **expected damage, not wind threshold**, and the
+model is undocumented (a `taosArchive` field hints at TAOS). The
+band-to-wind mapping is still unknown — do not guess it.
+
+Genevieve returns zero exposure with empty `totalByCountry`, which is
+legitimate: it was post-tropical and offshore in the East Pacific. So
+the April "exposure compute may be broken" concern was a manual-entry
+artifact, not a general defect.
+
+### Same bulletin as GDACS
+
+At advisory 31 PDC and GDACS agreed **exactly** on position
+(25.00N, 145.70E), intensity (90 kt), and all twelve quadrant radii
+(34 kt: 230/170/160/210 nm; 50 kt: 120/90/50/100; 64 kt: 80/30/30/70).
+Both relay the JTWC bulletin unaltered. Divergence between the two is
+therefore attributable entirely to the exposure computation.
+
+For Japan: PDC 1,420,000 vs GDACS 1,319,839 at 34 kt (~8% apart). GDACS
+additionally reports CHN 30.6M and TWN 12.0M, which PDC does not — GDACS
+`getimpact` accumulates over the whole event including the forecast leg,
+while PDC computes against the current `impactGeometry`.
+
+### Status of the April open questions
+
+| # | Question | Status |
+|---|---|---|
+| 1 | Manual vs automated ingestion | **Resolved** — both paths exist; automated is the norm for live storms |
+| 2 | Per-advisory tracks in `features` | **Resolved** — yes, with position/segment/cone features and quadrant radii |
+| 3 | What triggers the exposure compute | **Mostly resolved** — runs for automated cyclones; zeros were a manual-entry artifact |
+| 4 | Cyclone `exposureLevels` structure | **Resolved** — three discrete damage bands; wind mapping still unknown |
+| 5 | `endedAt` lifecycle | **Open** — Bavi still sentinel weeks after its GDACS counterpart ended; Dolphin used a *projected* future end while active |
+| 6 | Historical access | **Open, and worse** — no history even for live storms |
+| 7 | Filters and pagination | **Open** — unchanged |
+| 8 | Joining to IBTrACS | **Resolved** — exact join via `atcfId` |
+
+Still unobserved: everything landfall-related (`landfallAdmin0`,
+`landfallTime`, `hoursLandfall`, `categoryLandfall`,
+`distanceLandfallK`), and multi-country `totalByCountry` for an
+automated cyclone.
+
 ## Integration target: existing ADAM and GDACS exposure schemas
 
 PDC's exposure output needs to align with what's already wired into the book
@@ -581,19 +709,21 @@ name but not a data source.
 4. **Active-only feed risk.** If PDC has no archive endpoint, the "historical" pipeline becomes a daily-poll-and-accumulate, similar to the GDACS daily monitor. That's a substantively different deliverable from ADAM/GDACS historical CSVs and worth flagging early.
 5. **No prior PDC code in the repo** as of branch creation — fresh slate, no scaffolding to inherit.
 
-## Worktree / branch context for this work
+## Credentials and code in this repo
 
-This branch (`add-pdc-exposure`) lives in a separate worktree to avoid
-interfering with parallel Claude sessions on `merge-cerf-exposure`:
+The project has **no `.env` file**; `PDC_API_KEY`,
+`DSCI_AZ_BLOB_DEV_SAS`, `DSCI_AZ_BLOB_DEV_SAS_WRITE` and
+`DSCI_AZ_BLOB_PROD_SAS` all come from shell env (zshrc). The scheduled
+workflow needs `PDC_API_KEY` and `DSCI_AZ_BLOB_DEV_SAS_WRITE` as repo
+secrets — note the existing `DSCI_AZ_BLOB_DEV_SAS` secret is read-only
+and is not sufficient for the poller.
 
-```
-/Users/zackarno/Documents/CHD/repos/ds-storm-impact-harmonisation       merge-cerf-exposure  (other sessions)
-/Users/zackarno/Documents/CHD/repos/ds-storm-impact-harmonisation-pdc   add-pdc-exposure     (PDC work, this directory)
-```
-
-Both share one `.git`, so commits and fetches are visible across.
-
-Credentials: project has **no `.env` file**; `PDC_API_KEY`,
-`DSCI_AZ_BLOB_DEV_SAS`, and `DSCI_AZ_BLOB_PROD_SAS` all come from shell
-env (zshrc).
+| Path | Role |
+|---|---|
+| `scripts/poll_pdc_cyclones.py` | 3-hourly capture to raw blob |
+| `.github/workflows/pdc-cyclone-poll.yml` | the schedule |
+| `src/datasets/pdc.py` | parsing of captured records |
+| `scripts/cache_pdc_sinlaku.py` | chapter 08 snapshot |
+| `scripts/cache_pdc_dolphin.py` | chapter 11 snapshot |
+| `docs/decisions/0005-capture-pdc-cyclones-without-integrating-them.md` | why we capture but do not integrate |
 

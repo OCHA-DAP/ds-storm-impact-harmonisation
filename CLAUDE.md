@@ -41,12 +41,26 @@ All in Azure Blob Storage (`projects` container, `dev` stage):
 
 Book chapters that fetch from external APIs cache responses to avoid re-fetching on every render. Chapters load from cache by default; live API call code is kept in `eval: false` cells for reference.
 
-**Local caches** (event-specific, committed to git): live in `book/_cache/<chapter>/` and are populated by `scripts/cache_*.py` scripts.
+**Local caches** (event-specific): live in `book/_cache/<chapter>/` and are
+populated by `scripts/cache_*.py` scripts. `book/_cache/*` is **gitignored by
+default** — regenerate a cache locally before rendering its chapter, unless the
+table below marks it tracked.
 
-| Chapter | Cache script | Cache dir |
-|---|---|---|
-| `06-gdacs-episodes.qmd` | `scripts/cache_gdacs_episodes.py` | `book/_cache/06-gdacs-episodes/` |
-| `08-pdc-evaluation.qmd` | `scripts/cache_pdc_sinlaku.py` | `book/_cache/08-pdc-evaluation/` |
+| Chapter | Cache script | Cache dir | Tracked? |
+|---|---|---|---|
+| `06-gdacs-episodes.qmd` | `scripts/cache_gdacs_episodes.py` | `book/_cache/06-gdacs-episodes/` | No — 14M, regenerate locally |
+| `08-pdc-evaluation.qmd` | `scripts/cache_pdc_sinlaku.py` | `book/_cache/08-pdc-evaluation/` | **Yes** — 108K, via a `.gitignore` negation |
+| `11-pdc-2026-season.qmd` | `scripts/cache_pdc_dolphin.py` | `book/_cache/11-pdc-2026-season/` | **Yes** — 520K, via a `.gitignore` negation |
+
+## PDC cyclone capture
+
+`scripts/poll_pdc_cyclones.py` runs 3-hourly via
+`.github/workflows/pdc-cyclone-poll.yml`, archiving raw PDC cyclone
+responses to `ds-storm-impact-harmonisation/raw/pdc/cyclones/` on dev blob.
+PDC serves no archive and no track history, so this record only exists going
+forward and missed polls are unrecoverable — see
+`docs/decisions/0005-capture-pdc-cyclones-without-integrating-them.md`.
+Parsing lives in `src/datasets/pdc.py`; reference in `docs/pdc_api.md`.
 
 **Blob caches** (full-dataset, stored in Azure): populated by `scripts/refresh_*.py` scripts and read via `stratus.load_parquet_from_blob()`.
 
