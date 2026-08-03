@@ -9,15 +9,37 @@ name: PDC Cyclone Poll
 # PDC's ingest lag behind JTWC/NHC is not documented, so polling at twice the
 # advisory rate avoids having to guess it. Over-polling is free: details are
 # keyed on (uuid, updatedAt), so an unchanged hazard rewrites the same blob.
+#
+# ---------------------------------------------------------------------------
+# Why this file lives on the default branch but runs another branch's code
+# ---------------------------------------------------------------------------
+# GitHub only fires `schedule` and `workflow_dispatch` for workflows on the
+# DEFAULT branch (main). The poller itself lives on the analysis trunk, which
+# is not main. So this file sits on main purely as the trigger, and checks out
+# `source_ref` to get the code.
+#
+# Keep this file byte-identical on main and on the analysis branch, so merging
+# the two trunks does not conflict here.
+#
+# When the analysis trunk lands on main, change SOURCE_REF_DEFAULT to `main`
+# and this indirection disappears.
 on:
   schedule:
     - cron: "40 */3 * * *"
   workflow_dispatch:
     inputs:
+      source_ref:
+        description: "Branch/tag to run the poller from"
+        type: string
+        default: merge-cerf-exposure
       dry_run:
         description: "Fetch and report, but write nothing to blob"
         type: boolean
         default: false
+
+env:
+  # Scheduled runs cannot take inputs, so the default lives here too.
+  SOURCE_REF_DEFAULT: merge-cerf-exposure
 
 # A late run must not overlap a still-running one; the newer poll is the
 # useful one, but let the in-flight capture finish rather than truncating it.
@@ -31,7 +53,26 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Resolve source ref
+        id: ref
+        run: |
+          REF="${{ github.event.inputs.source_ref }}"
+          if [ -z "$REF" ]; then REF="$SOURCE_REF_DEFAULT"; fi
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "Running poller from: $REF"
+
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ref.outputs.ref }}
+
+      - name: Fail early if the poller is not on that ref
+        run: |
+          if [ ! -f scripts/poll_pdc_cyclones.py ]; then
+            echo "::error::scripts/poll_pdc_cyclones.py not found on \
+          '${{ steps.ref.outputs.ref }}'. Point source_ref at a branch that \
+          has it, or update SOURCE_REF_DEFAULT."
+            exit 1
+          fi
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
