@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-07-31
 decision-makers: Zack Arno
 consulted: Tristan Downing
