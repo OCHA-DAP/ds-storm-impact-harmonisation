@@ -41,12 +41,15 @@ All in Azure Blob Storage (`projects` container, `dev` stage):
 
 Book chapters that fetch from external APIs cache responses to avoid re-fetching on every render. Chapters load from cache by default; live API call code is kept in `eval: false` cells for reference.
 
-**Local caches** (event-specific, committed to git): live in `book/_cache/<chapter>/` and are populated by `scripts/cache_*.py` scripts.
+**Local caches** (event-specific): live in `book/_cache/<chapter>/` and are
+populated by `scripts/cache_*.py` scripts. `book/_cache/*` is **gitignored by
+default** — regenerate a cache locally before rendering its chapter, unless the
+table below marks it tracked.
 
-| Chapter | Cache script | Cache dir |
-|---|---|---|
-| `06-gdacs-episodes.qmd` | `scripts/cache_gdacs_episodes.py` | `book/_cache/06-gdacs-episodes/` |
-| `08-pdc-evaluation.qmd` | `scripts/cache_pdc_sinlaku.py` | `book/_cache/08-pdc-evaluation/` |
+| Chapter | Cache script | Cache dir | Tracked? |
+|---|---|---|---|
+| `06-gdacs-episodes.qmd` | `scripts/cache_gdacs_episodes.py` | `book/_cache/06-gdacs-episodes/` | No — 14M, regenerate locally |
+| `08-pdc-evaluation.qmd` | `scripts/cache_pdc_sinlaku.py` | `book/_cache/08-pdc-evaluation/` | **Yes** — 108K, via a `.gitignore` negation |
 
 **Blob caches** (full-dataset, stored in Azure): populated by `scripts/refresh_*.py` scripts and read via `stratus.load_parquet_from_blob()`.
 
