@@ -7,6 +7,7 @@ book/_cache/*
 # out of PDC's rolling list feed, so committing it keeps chapter 08 rendering
 # on a clean clone. Other caches stay ignored (06-gdacs-episodes is 14M).
 !book/_cache/08-pdc-evaluation/
+!book/_cache/11-pdc-2026-season/
 book/*_files/
 data/
 __pycache__/

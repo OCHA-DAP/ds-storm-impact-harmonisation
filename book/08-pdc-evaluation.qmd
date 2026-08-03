@@ -453,6 +453,24 @@ different layer of the pipeline from exposure quantification.
 The conservative re-evaluation point is the next non-manual cyclone
 in the feed. The answers to the open questions above should clarify
 whether such a storm is something we can expect to see, and what it
-would carry. The comparison can be re-run on any future storm with
-`artefacts/13_pdc_vs_gdacs/compare_sinlaku.py` (generalised to any
-UUID).
+would carry.
+
+::: {.callout-important}
+## Superseded in part by chapter 11
+
+That re-evaluation trigger fired during the 2026 season.
+[PDC Revisited: The 2026 Season](11-pdc-2026-season.qmd) re-runs this
+comparison against automatically-ingested cyclones and revises the
+recommendation above.
+
+In short: open questions 1 and 8 are resolved, and the
+"manual entry with zero exposure" finding does **not** generalise —
+automated cyclones carry full forecast tracks, standard quadrant wind
+radii, per-country exposure, and an ATCF ID that joins exactly to
+IBTrACS. The paragraph above claiming GDACS "already provides what we
+need" for real-time monitoring also needs qualifying. Conversely the
+no-archive limitation holds and is more severe than described here:
+PDC carries no track history even for live storms.
+
+Read chapter 11 before acting on this chapter's recommendation.
+:::
