@@ -1,0 +1,54 @@
+name: PDC Cyclone Poll
+
+# PDC serves no archive and no track history — a cyclone detail object holds
+# only the current advisory's forecast, so a storm's past exists solely in the
+# polls we took at the time. Missed cycles are unrecoverable, which is why this
+# runs unattended rather than on demand.
+#
+# Every 3 hours. The synoptic advisory cycle is 6-hourly (03/09/15/21 UTC), but
+# PDC's ingest lag behind JTWC/NHC is not documented, so polling at twice the
+# advisory rate avoids having to guess it. Over-polling is free: details are
+# keyed on (uuid, updatedAt), so an unchanged hazard rewrites the same blob.
+on:
+  schedule:
+    - cron: "40 */3 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Fetch and report, but write nothing to blob"
+        type: boolean
+        default: false
+
+# A late run must not overlap a still-running one; the newer poll is the
+# useful one, but let the in-flight capture finish rather than truncating it.
+concurrency:
+  group: pdc-cyclone-poll
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install deps
+        run: uv sync
+
+      - name: Poll PDC
+        env:
+          PDC_API_KEY: ${{ secrets.PDC_API_KEY }}
+          DSCI_AZ_BLOB_DEV_SAS: ${{ secrets.DSCI_AZ_BLOB_DEV_SAS }}
+          DSCI_AZ_BLOB_DEV_SAS_WRITE: ${{ secrets.DSCI_AZ_BLOB_DEV_SAS_WRITE }}
+        run: |
+          ARGS=""
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          uv run python scripts/poll_pdc_cyclones.py $ARGS
