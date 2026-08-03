@@ -1,0 +1,467 @@
+---
+title: "GDACS Episodes: Per-Issuance Impact Data"
+jupyter: ds-storm-impact
+---
+
+GDACS recalculates storm impact at every advisory (~6 hours). Each
+recalculation is an **episode**. This chapter explores what data lives
+inside episodes, how cumulative impact estimates evolve across
+issuances, and how early forecasts compare to final observations.
+
+We use Typhoon KALMAEGI-25 (GDACS event 1001233) as a case study:
+a multi-country storm with 22 episodes spanning 6 days.
+
+```{python}
+#| label: setup
+#| output: false
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, "..")
+
+import pandas as pd
+import plotly.graph_objects as go
+
+EVENTID = 1001233  # KALMAEGI-25
+CACHE_DIR = Path("_cache/06-gdacs-episodes")
+SELECTED_EPISODES = [1, 5, 11, 16, 22]
+```
+
+### Loading cached data
+
+API responses were cached locally with
+`scripts/cache_gdacs_episodes.py`. To refresh, run:
+
+```bash
+uv run python scripts/cache_gdacs_episodes.py
+```
+
+```{python}
+#| label: load-cache
+#| output: false
+
+# -- Event detail ----------------------------------------------------------
+detail = json.loads((CACHE_DIR / "event_detail.json").read_text())
+props = detail["properties"]
+n_episodes = len(props["episodes"])
+
+# -- Episode metadata + resource URLs --------------------------------------
+episode_data = {}
+for i in range(1, n_episodes + 1):
+    ep = json.loads((CACHE_DIR / f"episodes/{i}.json").read_text())
+    p = ep["properties"]
+    episode_data[i] = {
+        "alert_level": p["episodealertlevel"],
+        "resources": p["impacts"][0]["resource"],
+    }
+
+df_episodes = pd.DataFrame(
+    [
+        {"episode": k, "alert_level": v["alert_level"]}
+        for k, v in episode_data.items()
+    ]
+)
+
+# -- Impact JSON for latest episode (datum group exploration) --------------
+impact_json = json.loads(
+    (CACHE_DIR / f"impacts/{n_episodes}.json").read_text()
+)
+
+# -- Cumulative impact across all episodes ---------------------------------
+impact_rows = []
+for ep_id in range(1, n_episodes + 1):
+    data = json.loads((CACHE_DIR / f"impacts/{ep_id}.json").read_text())
+    for dg in data["datums"]:
+        if dg["alias"] != "alert":
+            continue
+        total = 0
+        for d in dg["datum"]:
+            for s in d["scalars"]["scalar"]:
+                if s["name"] == "POP_AFFECTED":
+                    total += int(float(s["value"]))
+        impact_rows.append(
+            {
+                "episode": ep_id,
+                "alert_level": episode_data[ep_id]["alert_level"],
+                "n_admin_units": len(dg["datum"]),
+                "pop_affected_34kt": total,
+            }
+        )
+        break
+
+df_impact = pd.DataFrame(impact_rows)
+
+# -- Timeline data for selected episodes -----------------------------------
+tl_all = []
+for ep_id in SELECTED_EPISODES:
+    tl_data = json.loads(
+        (CACHE_DIR / f"timelines/{ep_id}.json").read_text()
+    )
+    for item in tl_data["channel"]["item"]:
+        is_obs = str(item.get("actual", "")).strip().lower() == "true"
+        tl_all.append(
+            {
+                "episode": ep_id,
+                "valid_date": pd.to_datetime(item["advisory_datetime"]),
+                "is_obs": is_obs,
+                "pop39": int(item["pop39"]),
+                "wind_speed": float(item["wind_speed"]),
+            }
+        )
+
+df_tl = pd.DataFrame(tl_all)
+
+issued_dates = (
+    df_tl[df_tl["is_obs"]]
+    .groupby("episode")["valid_date"]
+    .max()
+    .to_dict()
+)
+```
+
+::: {.callout-note collapse="true" title="Live API calls (reference)"}
+
+The cached data was originally fetched with these calls. Set
+`eval: true` to run them live instead of loading from cache.
+
+```{python}
+#| label: api-reference
+#| eval: false
+import requests
+
+from src.datasets.gdacs import get_episode_detail, get_event_detail
+
+detail = get_event_detail(EVENTID)
+props = detail["properties"]
+n_episodes = len(props["episodes"])
+
+# Fetch all episode details (1 API call each)
+episode_data = {}
+for i in range(1, n_episodes + 1):
+    ep = get_episode_detail(EVENTID, i)
+    p = ep["properties"]
+    episode_data[i] = {
+        "alert_level": p["episodealertlevel"],
+        "resources": p["impacts"][0]["resource"],
+    }
+
+# Fetch buffer39 impact per episode (1 API call each)
+for ep_id, ep in episode_data.items():
+    r = requests.get(ep["resources"]["buffer39"])
+    r.raise_for_status()
+    data = r.json()  # parse cumulative pop from data["datums"]
+
+# Fetch timeline per episode (1 API call each)
+for ep_id in [1, 5, 11, 16, 22]:
+    r = requests.get(episode_data[ep_id]["resources"]["timeline"])
+    r.raise_for_status()
+    items = r.json()["channel"]["item"]  # per-advisory rows
+```
+:::
+
+## API Hierarchy {#sec-episode-hierarchy}
+
+GDACS exposes storm data at three levels: **event**, **episode**, and
+**resource**. Episodes sit above both impact and timeline -- each
+episode has its own version of all four resources.
+
+```{mermaid}
+%%| fig-cap: "GDACS API hierarchy. The event-level resources are always identical to the latest episode's resources."
+graph TD
+    E["<b>Event</b><br/><code>geteventdata</code><br/>storm metadata, alert level"]
+
+    E --> EL["episodes: [1, 2, ..., N]"]
+
+    EL --> EP1["<b>Episode 1</b><br/><code>getepisodedata</code><br/>1st issuance"]
+    EL --> EP2["..."]
+    EL --> EPN["<b>Episode N</b><br/><code>getepisodedata</code><br/>latest issuance"]
+
+    E -. "resources = Episode N" .-> R_EVENT["resources (latest)"]
+
+    EP1 --> R1["resources (ep 1)"]
+    EPN --> RN["resources (ep N)"]
+
+    R1 -->|"getimpact"| B39_1["<b>buffer39</b><br/>cumul. pop at 34 kt<br/>by admin unit"]
+    R1 -->|"getimpact"| B74_1["<b>buffer74</b><br/>cumul. pop at 64 kt<br/>by admin unit"]
+    R1 -->|"gettimeline"| TL_1["<b>timeline</b>"]
+    R1 -->|"getlocations"| LOC_1["<b>locations</b><br/>GeoJSON"]
+
+    TL_1 --> OBS["<b>Observations</b><br/>(actual=True)<br/>advisories 1..K"]
+    TL_1 --> FCST["<b>Forecast tail</b><br/>(actual=False)<br/>~5-day extension"]
+
+    OBS --- SHARED["Each row contains:<br/>lat, lon, wind, gusts, pressure,<br/>pop39, pop74 (instantaneous),<br/>wind radii 34/50/64 kt by quadrant"]
+    FCST --- SHARED
+
+    RN -->|"getimpact"| B39_N["<b>buffer39</b>"]
+    RN -->|"getimpact"| B74_N["<b>buffer74</b>"]
+    RN -->|"gettimeline"| TL_N["<b>timeline</b>"]
+    RN -->|"getlocations"| LOC_N["<b>locations</b><br/>GeoJSON"]
+
+    B39_N --> DG["<b>9 datum groups</b>"]
+    DG --> DG_ALERT["<b>alert</b><br/>one row per admin unit"]
+    DG --> DG_COUNTRY["<b>country</b><br/>country-level totals<br/>ISO codes, area"]
+    DG --> DG_POP["<b>Population</b><br/>total pop summary"]
+    DG --> DG_CITY["<b>City</b><br/>cities + JRC pop<br/>at 10--150 km radii"]
+    DG --> DG_OTHER["Airports, Ports,<br/>Input Parameters, ..."]
+
+    DG_ALERT --> ALERT_FIELDS["Each row contains:<br/>ADMIN_NAME, GMI_CNTRY, CNTRY_NAME,<br/>POP_ADMIN, POP_AFFECTED,<br/>POP_ALERT_AFFECTED, SQKM, distance"]
+
+    style E fill:#4a86c8,color:#fff
+    style EP1 fill:#f0ad4e,color:#fff
+    style EPN fill:#d9534f,color:#fff
+    style EP2 fill:#eee,color:#999
+    style R_EVENT stroke-dasharray: 5 5
+    style OBS fill:#2ca02c,color:#fff
+    style FCST fill:#aaa,color:#fff
+    style SHARED fill:#f8f8f8,color:#333,stroke:#ccc
+    style DG fill:#eef,color:#333
+    style DG_ALERT fill:#d9534f,color:#fff
+    style DG_OTHER fill:#f8f8f8,color:#999,stroke:#ccc
+    style ALERT_FIELDS fill:#f8f8f8,color:#333,stroke:#ccc
+```
+
+The event-level resources always point to the latest episode:
+
+```{python}
+#| label: verify-event-eq-latest-episode
+event_res = props["impacts"][0]["resource"]
+ep_res = episode_data[n_episodes]["resources"]
+
+print(f"KALMAEGI-25: {n_episodes} episodes")
+print(f"Event-level resource URLs == Episode {n_episodes} URLs? {event_res == ep_res}")
+```
+
+## Episode Metadata {#sec-fetch-episodes}
+
+Each episode corresponds to one advisory issuance (~6-hourly). Alert
+level can change over the storm's life:
+
+```{python}
+#| label: show-episodes
+df_episodes
+```
+
+## Anatomy of an Episode's Resources {#sec-episode-anatomy}
+
+### Impact resource (buffer39 / buffer74)
+
+The impact resource contains **nine datum groups**, each providing a
+different slice of the affected area. The existing
+`get_impact_by_country()` function only reads the `alert` group and
+discards the rest.
+
+```{python}
+#| label: datum-groups
+datum_summary = []
+for dg in impact_json["datums"]:
+    alias = dg["alias"]
+    count = len(dg.get("datum", []))
+    fields = []
+    if count > 0:
+        scalars = dg["datum"][0].get("scalars", {}).get("scalar", [])
+        fields = [s["name"] for s in scalars]
+    datum_summary.append(
+        {
+            "alias": alias,
+            "records": count,
+            "sample_fields": ", ".join(fields[:5])
+            + ("..." if len(fields) > 5 else ""),
+        }
+    )
+
+pd.DataFrame(datum_summary)
+```
+
+The **alert** group contains 17 fields per admin unit. Key fields
+beyond what `get_impact_by_country()` currently captures:
+
+```{python}
+#| label: alert-fields
+alert_group = next(
+    dg for dg in impact_json["datums"] if dg["alias"] == "alert"
+)
+scalars = alert_group["datum"][0]["scalars"]["scalar"]
+pd.DataFrame(scalars).rename(columns={"name": "field"})
+```
+
+### Timeline resource
+
+The timeline contains one row per advisory position. Each row
+carries an `actual` flag: `True` for observations, `False` for
+forecast positions appended after the latest observation.
+
+```{python}
+#| label: timeline-structure
+tl_data = json.loads((CACHE_DIR / "timelines/11.json").read_text())
+items = tl_data["channel"]["item"]
+
+tl_rows = []
+for item in items:
+    is_obs = str(item.get("actual", "")).strip().lower() == "true"
+    tl_rows.append(
+        {
+            "advisory": item["advisory_number"],
+            "valid_date": item["advisory_datetime"],
+            "source": "OBS" if is_obs else "FCST",
+            "wind_ms": round(float(item["wind_speed"]), 1),
+            "pop39": f'{int(item["pop39"]):,}',
+        }
+    )
+
+print(
+    f"Episode 11: {sum(1 for r in tl_rows if r['source'] == 'OBS')} obs + "
+    f"{sum(1 for r in tl_rows if r['source'] == 'FCST')} forecast rows"
+)
+pd.DataFrame(tl_rows)
+```
+
+Episode 11 has 11 observations (the storm's first 2.5 days) plus 6
+forecast positions extending ~4 days ahead. The cumulative impact for
+this episode is computed over the **union of all wind polygons** across
+both observed and forecast positions.
+
+## Cumulative Impact Across Episodes {#sec-impact-evolution}
+
+Because each episode unions all prior observations with a fresh
+forecast tail, the cumulative population exposure changes with every
+issuance -- both because new areas are observed and because the
+forecast track shifts.
+
+```{python}
+#| label: fig-impact-evolution
+#| fig-cap: "Cumulative population exposed at 34 kt grows as episodes accumulate observations and update forecasts. Bar colour reflects the episode's alert level."
+alert_colors = {"Green": "#5cb85c", "Orange": "#f0ad4e", "Red": "#d9534f"}
+
+fig = go.Figure()
+fig.add_trace(
+    go.Bar(
+        x=df_impact["episode"],
+        y=df_impact["pop_affected_34kt"],
+        marker_color=df_impact["alert_level"].map(alert_colors),
+        text=df_impact["n_admin_units"].apply(lambda x: f"{x} units"),
+        textposition="outside",
+        hovertemplate=(
+            "Episode %{x}<br>"
+            "Pop affected: %{y:,.0f}<br>"
+            "%{text}<extra></extra>"
+        ),
+    )
+)
+fig.update_layout(
+    xaxis_title="Episode (issuance number)",
+    yaxis_title="Cumulative pop exposed (34 kt)",
+    yaxis_tickformat=",",
+    height=400,
+    margin=dict(t=20, b=40),
+)
+fig.show()
+```
+
+## Forecast vs Observation {#sec-forecast-vs-obs}
+
+The same valid date (a point on the storm's calendar) appears in
+multiple episodes. In an early episode it is a **forecast**; in a
+later episode it becomes an **observation**. This is the key value of
+episode data: you can see what GDACS was predicting at any point
+during the storm, and compare it to what actually happened.
+
+### Issued date vs valid date
+
+The table below shows the same valid date (3 Nov 2025, KALMAEGI's
+first major landfall) as seen from different episodes:
+
+```{python}
+#| label: tbl-issued-valid
+target = pd.Timestamp("2025-11-03 06:00")
+rows = []
+for ep_id in SELECTED_EPISODES:
+    match = df_tl[
+        (df_tl["episode"] == ep_id)
+        & (df_tl["valid_date"] == target)
+    ]
+    if len(match) == 0:
+        continue
+    row = match.iloc[0]
+    rows.append(
+        {
+            "episode": ep_id,
+            "issued": issued_dates[ep_id].strftime("%b %d %H:%M"),
+            "valid_date": target.strftime("%b %d %H:%M"),
+            "source": "OBS" if row["is_obs"] else "FCST",
+            "pop39": f'{row["pop39"]:,}',
+        }
+    )
+
+pd.DataFrame(rows)
+```
+
+### Spaghetti plot
+
+Each line below is one episode's full timeline. Solid segments are
+observations; dashed segments are forecast. Where lines overlap on
+the x-axis, you can see how the forecast shifted between issuances.
+
+```{python}
+#| label: fig-spaghetti
+#| fig-cap: "Each episode's view of population exposure over the storm's life. Solid = observation, dashed = forecast. Early episodes (blue) are mostly forecast; late episodes (purple) are mostly observation."
+colors = {1: "#1f77b4", 5: "#ff7f0e", 11: "#2ca02c", 16: "#d62728", 22: "#9467bd"}
+
+fig = go.Figure()
+
+for ep_id in SELECTED_EPISODES:
+    ep_tl = df_tl[df_tl["episode"] == ep_id].sort_values("valid_date")
+    obs = ep_tl[ep_tl["is_obs"]]
+    fcst = ep_tl[~ep_tl["is_obs"]]
+    issued = issued_dates[ep_id]
+    label = f"Ep {ep_id} (issued {issued:%b %d %H:%M})"
+
+    # Observation segment (solid)
+    if len(obs) > 0:
+        fig.add_trace(
+            go.Scatter(
+                x=obs["valid_date"],
+                y=obs["pop39"],
+                mode="lines+markers",
+                line=dict(color=colors[ep_id], width=2),
+                marker=dict(size=5),
+                name=f"{label} obs",
+                legendgroup=f"ep{ep_id}",
+            )
+        )
+
+    # Forecast segment (dashed), bridged from last obs point
+    if len(fcst) > 0:
+        bridge = pd.concat([obs.iloc[[-1]], fcst]) if len(obs) > 0 else fcst
+        fig.add_trace(
+            go.Scatter(
+                x=bridge["valid_date"],
+                y=bridge["pop39"],
+                mode="lines+markers",
+                line=dict(color=colors[ep_id], width=2, dash="dash"),
+                marker=dict(size=5, symbol="circle-open"),
+                name=f"{label} fcst",
+                legendgroup=f"ep{ep_id}",
+            )
+        )
+
+fig.update_layout(
+    xaxis_title="Valid date (storm timeline)",
+    yaxis_title="Pop exposed at 34 kt (instantaneous)",
+    yaxis_tickformat=",",
+    height=500,
+    margin=dict(t=20, b=40),
+    legend=dict(font=dict(size=10)),
+)
+fig.show()
+```
+
+## Summary {#sec-episode-summary}
+
+| Question | What to use |
+|---|---|
+| Current storm state (position, wind, instantaneous pop) | Event-level timeline (= latest episode timeline) |
+| Cumulative pop by country / admin unit | Event-level impact (= latest episode impact) |
+| How impact estimates evolved during the storm | Per-episode impact resources |
+| What GDACS was forecasting at a specific point in time | That episode's timeline resource |
+| Forecast verification (predicted vs observed) | Compare early episode timelines to final episode |

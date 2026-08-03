@@ -199,3 +199,26 @@ app/data/
 
 # superpowers brainstorming scratch
 .superpowers/
+
+# --- project-specific (storm-impact-harmonisation) -------------------------
+
+# agent scratch
+.claude/
+
+# Quarto book build output
+book/_output/
+book/_freeze/
+book/*_files/
+
+# Book chapter caches: ignored by default, with tracked exceptions for the two
+# small PDC snapshots whose source events have rotated out of PDC's feed and
+# are needed for those chapters to render on a clean clone. See CLAUDE.md.
+book/_cache/*
+!book/_cache/08-pdc-evaluation/
+!book/_cache/11-pdc-2026-season/
+
+# marimo runtime cache
+app/__marimo__/
+
+# exploratory scratch sandbox (see CLAUDE.md)
+artefacts/

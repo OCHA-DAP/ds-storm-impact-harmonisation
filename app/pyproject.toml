@@ -1,0 +1,22 @@
+[project]
+name = "cerf-predictor-app"
+version = "0.1.0"
+description = "Runtime-only dependency spec for deploying the CERF allocation predictor Marimo app."
+readme = "../README.md"
+# Must match the Azure App Service container's Python version.
+# Development of the parent repo uses 3.12; this constraint is ONLY for
+# resolving a deploy-time requirements.txt that installs cleanly on 3.10.
+requires-python = ">=3.10,<3.13"
+
+dependencies = [
+    "marimo>=0.9",
+    "matplotlib",
+    "numpy",
+    "ocha-stratus>=0.1.7",
+    "openpyxl",
+    "pandas",
+    "python-dotenv>=1.2.2",
+    "requests>=2.32",
+    "scipy",
+    "statsmodels",
+]

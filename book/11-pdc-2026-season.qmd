@@ -1,0 +1,427 @@
+---
+title: "PDC Revisited: The 2026 Season"
+jupyter: ds-storm-impact
+---
+
+The [PDC evaluation](08-pdc-evaluation.qmd) chapter recommended against
+integrating the Pacific Disaster Center's Hazards API, and set an
+explicit condition for revisiting that call: *the next non-manual
+cyclone in the feed*. At the time there was exactly one cyclone
+available — Tropical Storm Sinlaku, hand-entered by an analyst after
+the storm had already dissipated, with no track and zero exposure.
+Every conclusion rested on that single unrepresentative record.
+
+The 2026 Northern Hemisphere season has now supplied the missing
+evidence. This chapter re-runs the comparison against an
+automatically-ingested cyclone and revises the recommendation.
+
+The technical reference remains `docs/pdc_api.md`. The snapshot behind
+this chapter is pinned by `scripts/cache_pdc_dolphin.py` into
+`book/_cache/11-pdc-2026-season/` (tracked in git), because PDC drops
+storms from its feed roughly 30 days after they end.
+
+```{python}
+#| label: setup
+#| output: false
+import json
+import sys
+from pathlib import Path
+
+import pandas as pd
+import plotly.graph_objects as go
+
+sys.path.insert(0, "..")
+from src.datasets import pdc
+
+CACHE = Path("_cache/11-pdc-2026-season")
+
+dolphin = pdc.unwrap(json.loads((CACHE / "pdc_dolphin.json").read_text()))
+genevieve = pdc.unwrap(json.loads((CACHE / "pdc_genevieve.json").read_text()))
+bavi = pdc.unwrap(json.loads((CACHE / "pdc_bavi.json").read_text()))
+
+gdacs_tl = pd.read_csv(
+    CACHE / "gdacs_timeline.csv", parse_dates=["advisory_datetime"]
+)
+gdacs_39 = pd.read_csv(CACHE / "gdacs_impact_buffer39.csv")
+gdacs_74 = pd.read_csv(CACHE / "gdacs_impact_buffer74.csv")
+
+meta = pdc.parse_meta(dolphin)
+track = pdc.parse_track(dolphin)
+exposure = pdc.parse_exposure(dolphin)
+bands = pdc.parse_exposure_bands(dolphin)
+
+actual = gdacs_tl[gdacs_tl["actual"].astype(str).str.lower() == "true"]
+forecast = gdacs_tl[gdacs_tl["actual"].astype(str).str.lower() != "true"]
+```
+
+## What is in the feed now
+
+Probing `/hazards?types=CYCLONE` on 2026-08-03 returned three cyclones
+rather than one, and critically, two of them carry
+`category = EVENT` — the automatically-ingested flavour that chapter 08
+had never observed.
+
+| | Typhoon Dolphin | Post-Tropical Cyclone Genevieve | Tropical Storm Bavi |
+|---|---|---|---|
+| `category` | `EVENT` | `EVENT` | `RESPONSE` |
+| Ingestion | automated | automated | `PDC Manual Hazard` |
+| `issuer` | JTWC | NHC | — |
+| `sourceRecordId` | `WP122026` | `EP072026` | internal UUID |
+| Forecast positions | 9 | 7 | 0 |
+| Exposure | 1.42M (JPN) | none (offshore) | 396.8M (CHN/TWN/JPN) |
+
+This settles the first of chapter 08's eight open questions. Manual
+entry is **not** the standard path for cyclones; it is one of two
+paths. Automated ingestion from official forecast centres exists and is
+the norm for live storms. Sinlaku was the exception, not the rule, and
+chapter 08 generalised from it because it had nothing else.
+
+The `sourceRecordId` for both automated storms is an
+[ATCF](https://www.nrlmry.navy.mil/atcf_web/) identifier — `WP122026`
+is Western Pacific storm 12 of 2026. Chapter 08 listed the absence of
+any such identifier as the blocker for joining PDC to IBTrACS. It is
+not absent for automated storms.
+
+## PDC and GDACS ingest the same bulletin
+
+Typhoon Dolphin is also a GDACS event (`1001297`, `DOLPHIN-26`). Both
+systems were on **advisory 31** at capture time, which allows an exact
+like-for-like comparison rather than an approximate one.
+
+```{python}
+#| label: tbl-radii
+#| echo: false
+g = actual.sort_values("advisory_datetime").iloc[-1]
+p = track.iloc[0]
+
+rows = [
+    ["Valid time", str(g["advisory_datetime"]), str(p["valid_time"])],
+    ["Latitude", f"{g['latitude']:.2f}", f"{p['latitude']:.2f}"],
+    ["Longitude", f"{g['longitude']:.2f}", f"{p['longitude']:.2f}"],
+    [
+        "Max wind (kt)",
+        f"{g['wind_speed'] * 1.94384:.0f}",
+        f"{p['max_winds_kt']:.0f}",
+    ],
+]
+for kt in (34, 50, 64):
+    gq = [int(g[f"windrad_nm_{kt}kt_{q}"]) for q in ("ne", "se", "sw", "nw")]
+    pq = [int(p[f"r{kt}_{q}_nm"]) for q in ("ne", "se", "sw", "nw")]
+    rows.append([f"{kt} kt radii NE/SE/SW/NW (nm)", str(gq), str(pq)])
+
+pd.DataFrame(rows, columns=["Field", "GDACS", "PDC"]).style.hide(axis="index")
+```
+
+Every value matches — position, intensity, and all twelve quadrant wind
+radii. Neither system is modelling the storm; both are relaying the same
+JTWC bulletin unaltered.
+
+That is a more useful finding than it first appears. It means any
+divergence in the exposure numbers below is attributable **entirely to
+the exposure computation**, not to differing meteorology. The two
+systems are a controlled comparison: identical geometry, different
+population engines.
+
+It also means PDC carries quadrant wind radii at the same 34/50/64 kt
+thresholds the repository already uses for `pop_34kt` / `pop_64kt`.
+The geometry is directly compatible with existing code, including
+`gdacs.wind_radii_polygon()`.
+
+## Where they diverge: exposure
+
+```{python}
+#| label: tbl-exposure
+#| echo: false
+jpn_pdc = exposure.loc[exposure["iso3"] == "JPN", "pop_total"].iloc[0]
+jpn_39 = gdacs_39.loc[gdacs_39["iso3"] == "JPN", "pop_affected"].iloc[0]
+jpn_74 = gdacs_74.loc[gdacs_74["iso3"] == "JPN", "pop_affected"].iloc[0]
+
+summary = pd.DataFrame(
+    {
+        "Source": [
+            "PDC total (Japan)",
+            "GDACS 34 kt buffer (Japan)",
+            "GDACS 64 kt buffer (Japan)",
+        ],
+        "Population": [f"{jpn_pdc:,.0f}", f"{jpn_39:,.0f}", f"{jpn_74:,.0f}"],
+    }
+)
+summary.style.hide(axis="index")
+```
+
+For Japan the two agree closely: PDC's 1.42M sits about 8% above
+GDACS's 34 kt figure of 1.32M, and comfortably within the range bounded
+by the 34 kt and 64 kt buffers. Given entirely independent population
+rasters and swath definitions, that is good agreement.
+
+The disagreement is in **which countries appear at all**:
+
+```{python}
+#| label: tbl-countries
+#| echo: false
+cmp = gdacs_39[["iso3", "country", "pop_affected"]].copy()
+cmp = cmp.rename(columns={"pop_affected": "GDACS 34 kt"})
+cmp = cmp.merge(
+    exposure[["iso3", "pop_total"]].rename(columns={"pop_total": "PDC"}),
+    on="iso3",
+    how="outer",
+)
+cmp["GDACS 34 kt"] = cmp["GDACS 34 kt"].map(
+    lambda v: "not computed" if v == -1 else f"{v:,.0f}"
+)
+cmp["PDC"] = cmp["PDC"].map(lambda v: "—" if pd.isna(v) else f"{v:,.0f}")
+cmp.style.hide(axis="index")
+```
+
+GDACS reports 30.6M exposed in China and 12.0M in Taiwan; PDC reports
+neither. The explanation is the integration window, not a missing
+country. GDACS's `getimpact` accumulates over the **entire event
+including the forecast leg**, and Dolphin's five-to-eight-day forecast
+carries it toward Taiwan and the East China Sea. PDC's exposure is
+computed against its current `impactGeometry` swath. The two are
+answering different questions — "who could be affected before this
+storm is over" versus "who is inside the swath now" — and the numbers
+should not be reconciled without saying which is wanted.
+
+Marshall Islands appearing as `-1` in GDACS is the documented
+"not computed" sentinel, covered in chapter 09; it is not a zero.
+
+### Damage bands are discrete, not cumulative
+
+```{python}
+#| label: tbl-bands
+#| echo: false
+b = bands.copy()
+b["pop_total"] = b["pop_total"].map("{:,.0f}".format)
+b.columns = ["Level", "PDC description", "Population"]
+b.style.hide(axis="index")
+```
+
+The three bands sum to 1,428,100 against a reported total of 1,420,000
+— equal within PDC's own rounding. So the bands are **discrete**, like
+ADAM's 60/90/120 km/h bands, rather than **cumulative**, like GDACS's
+`pop_34kt` / `pop_64kt`. Chapter 07's harmonisation logic already
+handles that conversion.
+
+One caution: PDC labels these bands by expected damage
+("Moderate Damage; 5% of value"), not by wind threshold, and the model
+behind them is undocumented — the payload hints at TAOS via a
+`taosArchive` field. Mapping a band to a wind speed would be a guess,
+and this chapter does not make one.
+
+### The bands are also split by country
+
+`exposureLevels[].data` carries its own nested `totalByCountry`, so
+exposure is available per (country, band) rather than only as one
+national number:
+
+```{python}
+#| label: tbl-band-country
+#| echo: false
+rows = []
+exposure_data = (dolphin.get("exposure") or {}).get("data") or {}
+for lv in exposure_data.get("exposureLevels") or []:
+    for e in (lv.get("data") or {}).get("totalByCountry") or []:
+        pop = ((e.get("population") or {}).get("total") or {}).get("value", 0)
+        rows.append(
+            {
+                "Band": lv.get("level"),
+                "Description": lv.get("exposureDescription"),
+                "Country": e.get("country"),
+                "Population": f"{pop:,.0f}",
+            }
+        )
+pd.DataFrame(rows).style.hide(axis="index")
+```
+
+That makes PDC's exposure grain **country × damage band** — the
+structural analogue of GDACS's `pop_34kt`/`pop_64kt` and ADAM's
+60/90/120 km/h bands, keyed on expected damage instead of wind speed.
+
+### But there is no sub-national breakdown
+
+The detail object has a `totalByAdmin` array with `admin1` and `admin2`
+slots, which reads like a sub-national breakdown. It is not one. Those
+fields are never populated, and the array duplicates `totalByCountry`.
+
+We tested this against the whole live feed on 2026-08-03 — 974 hazards
+across 21 types, sampling up to three per type so that **every type was
+covered**, 57 hazards fetched in total:
+
+| | |
+|---|---|
+| Hazards with any exposure rows | 54 / 57 |
+| With a non-null `admin1` or `admin2` | **0** |
+| Where `totalByAdmin` differed from `totalByCountry` | **0 of 54** — identical countries *and* values |
+
+This is not a cyclone-specific gap: the sample spans wildfire, flood,
+earthquake, volcano, extreme temperature and conflict.
+
+What it does not establish is *why*. The published PDF documents
+`totalByAdmin` as an admin breakdown and the fields are structurally
+present, which fits either "not computed" or "not exposed at our API
+tier" equally well. Our test cannot separate those, and it is the
+single most consequential thing to ask PDC.
+
+The consequence either way is that **PDC is adm0-only** for this book's
+purposes. It cannot participate in the `adm0 = Σ adm1` conservation
+check of [ADR 0002](../docs/decisions/0002-admin-level-conservation-of-source-exposure.md),
+and any plan that needs PDC sub-nationally is blocked on that answer.
+Its only sub-national-ish axis is the damage bands above, which slice
+by severity rather than geography.
+
+## The structural limitation is real, and different from what we thought
+
+Chapter 08 identified the absence of an archive as disqualifying. That
+holds. But the live data shows the problem is sharper than "no
+back-catalogue".
+
+**A PDC cyclone record contains no track history at all.** Dolphin was
+on advisory 31, having formed on 27 July, yet the detail object carries
+nine positions of which the earliest is the present synoptic hour.
+Advisories 1 through 30 are absent. GDACS, queried at the same moment,
+returned all 31 actual advisories plus its forecast leg.
+
+```{python}
+#| label: fig-track
+#| fig-cap: "Typhoon Dolphin at advisory 31. GDACS (purple) holds all 31 actual advisories back to formation on 27 July. PDC (red) holds only the forecast leg from the current synoptic hour forward — the two overlap exactly where both have data, and PDC simply has no record of the preceding week."
+fig = go.Figure()
+fig.add_trace(
+    go.Scattermap(
+        lat=actual["latitude"],
+        lon=actual["longitude"],
+        mode="lines+markers",
+        line={"width": 3, "color": "#6a3d9a"},
+        marker={"size": 6, "color": "#6a3d9a"},
+        name=f"GDACS actual ({len(actual)} advisories)",
+        text=[
+            f"adv {int(r.advisory_number)}<br>{r.advisory_datetime}"
+            f"<br>{r.wind_speed * 1.94384:.0f} kt"
+            for r in actual.itertuples()
+        ],
+        hoverinfo="text",
+    )
+)
+fig.add_trace(
+    go.Scattermap(
+        lat=forecast["latitude"],
+        lon=forecast["longitude"],
+        mode="lines+markers",
+        line={"width": 2, "color": "#b497d6"},
+        marker={"size": 5, "color": "#b497d6"},
+        name="GDACS forecast",
+        hoverinfo="skip",
+    )
+)
+fig.add_trace(
+    go.Scattermap(
+        lat=track["latitude"],
+        lon=track["longitude"],
+        mode="lines+markers",
+        line={"width": 3, "color": "#d6604d"},
+        marker={"size": 10, "color": "#d6604d", "symbol": "circle"},
+        name=f"PDC forecast ({len(track)} positions)",
+        text=[
+            f"pos {int(r.position_no)}<br>{r.valid_time}"
+            f"<br>{r.max_winds_kt:.0f} kt"
+            for r in track.itertuples()
+        ],
+        hoverinfo="text",
+    )
+)
+fig.update_layout(
+    map={
+        "style": "carto-positron",
+        "center": {
+            "lat": float(gdacs_tl["latitude"].mean()),
+            "lon": float(gdacs_tl["longitude"].mean()),
+        },
+        "zoom": 3,
+    },
+    height=550,
+    margin={"r": 0, "t": 10, "l": 0, "b": 0},
+    legend={"yanchor": "top", "y": 0.99, "xanchor": "left", "x": 0.01},
+)
+fig
+```
+
+The operational consequence is that a PDC historical record cannot be
+backfilled *even for storms currently in the feed*. It can only be
+accumulated forward, at the advisory cadence, by polling. That is why
+`scripts/poll_pdc_cyclones.py` runs every three hours rather than daily:
+a daily poll would silently discard roughly three of every four
+advisories, and those are unrecoverable.
+
+## An incidental finding about our own GDACS loader
+
+Locating Dolphin in GDACS exposed a bug on our side worth recording.
+
+`gdacs.get_active_cyclones()` leaves the `alertlevel` parameter unset by
+default, documented as "Default: all levels". GDACS does not treat an
+omitted `alertlevel` as "all":
+
+| Query | Events returned | Contains DOLPHIN-26 |
+|---|---|---|
+| `eventlist=TC&limit=100` | 19 | no |
+| `eventlist=TC&limit=100&alertlevel=green;orange;red` | 100 | yes |
+
+Every one of the 19 events in the unfiltered response is Orange or Red.
+Omitting the parameter silently restricts results to those two levels,
+so the function drops Green events — and Dolphin, a Category 2 typhoon
+with 1.3M exposed in Japan by GDACS's own reckoning, is Green. Any
+monitoring that relies on the default is blind to storms in this
+category.
+
+## Revised recommendation
+
+Chapter 08's recommendation was **do not integrate**, resting on three
+supports. Two have now failed:
+
+1. *"PDC's only observable cyclone is a manual response snapshot with
+   zero exposure."* — **No longer true.** Automatically-ingested
+   cyclones exist, carry full forecast tracks with standard quadrant
+   wind radii, and compute per-country exposure.
+2. *"PDC has no path to IBTrACS."* — **Resolved.** Automated cyclones
+   carry an ATCF ID, which joins exactly to IBTrACS `USA_ATCF_ID`.
+   This is a stronger link than the GDACS side has: `gdacs.py` matches
+   on name plus season and needs a hand-maintained exceptions list for
+   unnamed storms, which the ATCF key handles natively.
+3. *"No archive, so no backfill to CERF's 2006 baseline."* —
+   **Still true, and worse than described.** There is no track history
+   even for live storms.
+
+The conclusion that follows is not "integrate PDC" but a change in what
+PDC is *for*. It was assessed as a historical exposure source, and as
+that it remains unusable — nothing will ever backfill it. What the live
+data shows is a competent real-time product: same bulletin as GDACS,
+same wind geometry, an independent exposure estimate that agrees with
+GDACS to within 8% on the country both cover, and a clean storm
+identifier.
+
+That makes PDC a candidate **corroborating source for real-time
+monitoring**, in the `ds-storms-pipeline` / `ds-storms-alerts` lane, and
+not a candidate for the historical harmonisation this book is otherwise
+about. Two independent exposure estimates over identical geometry is
+exactly the kind of cross-check that makes an alert more trustworthy,
+and the incidental GDACS finding above is a concrete illustration of why
+depending on a single source is fragile.
+
+Concretely, the position this chapter supports:
+
+- **Keep capturing.** The poller is running every three hours. The
+  archive only exists going forward, so the cost of waiting is
+  permanent, and it is small.
+- **Do not integrate into the historical pipeline.** Nothing here
+  changes the 2006-baseline problem.
+- **Re-assess for real-time alerting after a landfall.** Dolphin had not
+  made landfall at capture time (`landfallAdmin0` was null), so the
+  fields PDC reserves for landfall — `hoursLandfall`,
+  `categoryLandfall`, `landfallTime` — are still unobserved, and the
+  band-to-wind-threshold mapping is still unknown.
+
+The remaining open questions from chapter 08 that this chapter does not
+settle are the exposure-compute trigger in full, the `RESPONSE` category
+lifecycle, and PDC's `endedAt` semantics — Bavi still carries the
+"active" sentinel three weeks after its GDACS counterpart ended, and
+reports 396.8M exposed at a single coarse band, which is reason enough
+to treat the `RESPONSE` tier as unfit for quantitative use.
