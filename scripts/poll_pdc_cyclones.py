@@ -151,7 +151,18 @@ def main() -> None:
             continue
         # updatedAt is the version key. Re-polling an unchanged hazard
         # rewrites this exact path, so repeat polls are idempotent.
-        updated = props.get("updatedAt", "unknown")
+        #
+        # Taken from the *detail* object, not the list view: the two disagree
+        # by 5-22s (the list timestamp appears to be an index-materialisation
+        # time). Keying on the detail keeps the filename and the record it
+        # contains consistent. Fall back to the list value if absent.
+        # Avro wrapping is inconsistent even within `hazard`: updatedAt is a
+        # bare int while its sibling endedAt is {"long": ...}. Unwrap
+        # defensively so a future change cannot put a dict in a filename.
+        updated = (detail.get("hazard") or {}).get("updatedAt")
+        if isinstance(updated, dict):
+            updated = next(iter(updated.values()), None)
+        updated = updated or props.get("updatedAt", "unknown")
         n = _put(
             f"{BLOB_PREFIX}/hazards/{uuid}/{updated}.json",
             detail,
