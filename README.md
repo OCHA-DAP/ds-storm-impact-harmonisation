@@ -55,6 +55,13 @@ cp .env.example .env  # fill in Azure credentials
 - `storm_impact_app.py` — marimo NHC storm impact app (track buffers, WSP).
 - `compare_exposure.py` — marimo CHD vs GDACS vs ADAM scatter comparison.
 
+> **`app/cerf_predictor.py` is no longer deployed from this repo.** The CERF
+> rapid-response allocation estimator now lives in
+> [`OCHA-DAP/ds-cerf-3rm-app`](https://github.com/OCHA-DAP/ds-cerf-3rm-app) and
+> is served at <https://cerf-3rm.azurewebsites.net>. Edit it there — the copy
+> here has no deployment and will drift. See
+> [ADR 0006](docs/decisions/0006-retire-the-cerf-rr-deployment-slot.md).
+
 ## Scheduled jobs
 
 | Workflow | Cadence | What it does |
