@@ -10,28 +10,21 @@ name: PDC Cyclone Poll
 # advisory rate avoids having to guess it. Over-polling is free: details are
 # keyed on (uuid, updatedAt), so an unchanged hazard rewrites the same blob.
 #
-# ---------------------------------------------------------------------------
-# Why this file lives on the default branch but runs another branch's code
-# ---------------------------------------------------------------------------
-# GitHub only fires `schedule` and `workflow_dispatch` for workflows on the
-# DEFAULT branch (main). The poller itself lives on the analysis trunk, which
-# is not main. So this file sits on main purely as the trigger, and checks out
-# `source_ref` to get the code.
-#
-# Keep this file byte-identical on main and on the analysis branch, so merging
-# the two trunks does not conflict here.
-#
-# When the analysis trunk lands on main, change SOURCE_REF_DEFAULT to `main`
-# and this indirection disappears.
+# `source_ref` selects which ref the poller runs from. It defaults to main and
+# normally needs no thought; it exists so the poller can be exercised from a
+# feature branch without merging first. (It originally carried a real
+# indirection: GitHub only fires `schedule`/`workflow_dispatch` from the
+# default branch, and the poller lived on a separate analysis trunk. That
+# trunk has since merged into main.)
 on:
   schedule:
     - cron: "40 */3 * * *"
   workflow_dispatch:
     inputs:
       source_ref:
-        description: "Branch/tag to run the poller from"
+        description: "Branch/tag to run the poller from (default: main)"
         type: string
-        default: merge-cerf-exposure
+        default: main
       dry_run:
         description: "Fetch and report, but write nothing to blob"
         type: boolean
@@ -39,7 +32,7 @@ on:
 
 env:
   # Scheduled runs cannot take inputs, so the default lives here too.
-  SOURCE_REF_DEFAULT: merge-cerf-exposure
+  SOURCE_REF_DEFAULT: main
 
 # A late run must not overlap a still-running one; the newer poll is the
 # useful one, but let the in-flight capture finish rather than truncating it.

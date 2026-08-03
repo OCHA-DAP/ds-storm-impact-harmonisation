@@ -4,10 +4,16 @@
 
 name: Build and deploy Python app to Azure Web App - chd-ds-seas5-viz
 
+# NOTE: the filename still says "merge-cerf-exposure" because the Azure portal
+# generated it from the branch this deploy was originally wired to. That branch
+# has merged into main and been retired; the trigger below is what matters.
+# The file is deliberately NOT renamed — renaming registers a new workflow in
+# Actions and orphans this one's run history, and the portal may recreate the
+# old name on the next deploy-config change.
 on:
   push:
     branches:
-      - merge-cerf-exposure
+      - main
   workflow_dispatch:
 
 jobs:
