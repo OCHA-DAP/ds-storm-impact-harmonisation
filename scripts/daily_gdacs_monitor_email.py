@@ -128,38 +128,57 @@ def fetch_active_exposure() -> tuple[pd.DataFrame, pd.DataFrame]:
     return active, pd.DataFrame(rows)
 
 
-def fetch_pdc_for_storms(active: pd.DataFrame) -> dict:
+def fetch_pdc_for_storms(active: pd.DataFrame, allow_missing: bool = False) -> dict:
     """Match each active GDACS storm to a live PDC record, keyed by eventid.
 
     Queried live rather than read from the 3-hourly capture archive: PDC
     publishes at bulletin issuance, so the archive can be up to 3 h stale at
     send time (docs/pdc_api.md, Update lag).
 
-    Best-effort throughout — any failure degrades to "no PDC panel for this
-    storm" rather than failing the email, because the GDACS content is the
-    part people depend on.
+    **Errors are raised, not swallowed.** An earlier version caught everything
+    and continued without PDC, which meant a missing PDC_API_KEY rendered an
+    email that was indistinguishable from one where PDC genuinely had no data
+    for the storm — and that shipped for several sends before anyone noticed.
+    A silently incomplete alert is worse than a failed job: the failure is
+    visible and fixable, the silent gap is neither.
+
+    Genuine absences are NOT errors and are reported as information: a storm
+    PDC does not carry, or carries with no exposure computed, is a real state
+    of the world.
+
+    Pass `allow_missing=True` (CLI: --allow-missing-pdc) to degrade
+    deliberately when PDC is known to be down and the GDACS content is still
+    wanted. Degradation is opt-in, never the default.
     """
     out: dict = {}
     if active.empty:
         return out
+
+    def _fail(msg: str) -> dict:
+        if allow_missing:
+            print(f"  WARN {msg} — continuing without PDC (--allow-missing-pdc)",
+                  flush=True)
+            return out
+        raise RuntimeError(
+            f"{msg}. The email would render with no PDC panels, which looks "
+            f"identical to PDC having no data. Re-run with --allow-missing-pdc "
+            f"if you deliberately want the GDACS-only email."
+        )
+
     if not os.environ.get("PDC_API_KEY"):
-        # Distinct from a transient failure: this is misconfiguration, and it
-        # looks identical to "PDC has no data" in the rendered email.
-        print("  !! PDC_API_KEY is not set — every PDC panel will be MISSING "
-              "from this email. This is a configuration error, not an absence "
-              "of PDC data.", flush=True)
-        return out
+        return _fail("PDC_API_KEY is not set")
+
     try:
         records = pdc_mod.fetch_active_cyclones()
-    except Exception as exc:  # noqa: BLE001 - never break the email over PDC
-        print(f"  WARN PDC list fetch failed, continuing without: {exc}", flush=True)
-        return out
+    except Exception as exc:  # noqa: BLE001 - re-raised with context below
+        return _fail(f"PDC list fetch failed: {exc}")
 
     print(f"  PDC active cyclones: {len(records)}", flush=True)
     for _, storm in active.iterrows():
         rec = pdc_mod.match_gdacs_name(storm["name"], records)
         if rec is None:
-            print(f"    {storm['name']}: no PDC match", flush=True)
+            # A real state of the world, not a failure.
+            print(f"    {storm['name']}: not in PDC's feed", flush=True)
             continue
         try:
             detail = pdc_mod.fetch_detail(rec["uuid"])
@@ -167,10 +186,10 @@ def fetch_pdc_for_storms(active: pd.DataFrame) -> dict:
             exposure = pdc_mod.parse_exposure(detail)
             bands = pdc_mod.parse_bands_by_country(detail)
         except Exception as exc:  # noqa: BLE001
-            print(f"    {storm['name']}: PDC detail failed ({exc})", flush=True)
-            continue
+            return _fail(f"PDC detail fetch/parse failed for {storm['name']}: {exc}")
         if exposure.empty:
-            print(f"    {storm['name']}: matched PDC but no exposure computed",
+            # Also real: PDC carries the storm but computed no exposure.
+            print(f"    {storm['name']}: in PDC, no exposure computed",
                   flush=True)
             continue
         out[storm["eventid"]] = {
@@ -213,6 +232,15 @@ def main():
         help=f"Listmonk list ID to target (default: {MONITOR_LIST_ID}).",
     )
     parser.add_argument(
+        "--allow-missing-pdc",
+        action="store_true",
+        help=(
+            "Send the GDACS-only email when PDC is unavailable. Off by "
+            "default: a silently PDC-less email is indistinguishable from one "
+            "where PDC had no data."
+        ),
+    )
+    parser.add_argument(
         "--auto-send",
         action="store_true",
         help=(
@@ -247,7 +275,8 @@ def main():
             flush=True,
         )
         print("Step 3: match PDC to active storms...", flush=True)
-        pdc_by_event = fetch_pdc_for_storms(active)
+        pdc_by_event = fetch_pdc_for_storms(
+            active, allow_missing=args.allow_missing_pdc)
 
         print("Step 4: render email HTML with inline strip plots...", flush=True)
         html = build_email_html(
