@@ -204,10 +204,10 @@ ADAM's 60/90/120 km/h bands, rather than **cumulative**, like GDACS's
 handles that conversion.
 
 One caution: PDC labels these bands by expected damage
-("Moderate Damage; 5% of value"), not by wind threshold, and the model
-behind them is undocumented — the payload hints at TAOS via a
-`taosArchive` field. Mapping a band to a wind speed would be a guess,
-and this chapter does not make one.
+("Moderate Damage; 5% of value"), not by wind threshold. They are
+**not** the 34/50/64 kt rings relabelled — that hypothesis is tested and
+refuted in [Where PDC's numbers come from](#where-pdcs-numbers-come-from)
+below, along with what the bands actually are.
 
 ### The bands are also split by country
 
@@ -269,6 +269,172 @@ check of [ADR 0002](../docs/decisions/0002-admin-level-conservation-of-source-ex
 and any plan that needs PDC sub-nationally is blocked on that answer.
 Its only sub-national-ish axis is the damage bands above, which slice
 by severity rather than geography.
+
+## Where PDC's numbers come from
+
+Everything above treats PDC's exposure as a black box. It is worth
+opening, because what is inside changes how much of it we can use and
+who we have to ask about the rest.
+
+Two sources of evidence: fields inside the API payload itself, and the
+layer metadata exposed in PDC's DisasterAWARE application (read from a
+logged-in session on 2026-08-04, since none of it is in the API or the
+public documentation).
+
+```{mermaid}
+%%| label: fig-provenance
+%%| fig-cap: "Provenance of the exposure figures PDC serves. Green is verified directly from the API payload; blue is documented in DisasterAWARE layer metadata; the dashed grey box is the one link we have not been able to establish. Note that the impact model is a third-party commercial product PDC subscribes to, not something PDC computes."
+flowchart TD
+    FC["Official forecast advisory<br/>NHC · CPHC · JTWC<br/><i>issuer field, verified</i>"]
+    KC["<b>KineticCast™</b><br/>Kinetic Analysis Corporation<br/><i>subscription service to PDC</i>"]
+    RES["60 arc-second grid<br/>~1.85 km<br/><i>taosArchive filename</i>"]
+    WIND["Estimated Wind Impacts<br/>= the damage bands"]
+    SURGE["Estimated Still Water<br/>Storm Surge"]
+    RAIN["Estimated Rainfall"]
+    POP[/"Population grid<br/><b>NOT DOCUMENTED</b><br/>age bands, vulnerable,<br/>households"/]
+    FAC["Facility inventory<br/>OSM/HOT + HIFLD + NDPBA<br/>+ national sources"]
+    OUT["exposure.data<br/>totalByCountry · exposureLevels<br/>capital.school / .hospital"]
+
+    FC --> KC
+    KC --> RES
+    RES --> WIND & SURGE & RAIN
+    WIND --> OUT
+    POP -.-> OUT
+    FAC --> OUT
+
+    classDef api fill:#d9f5d9,stroke:#2a8a2a,color:#000
+    classDef da fill:#e8f4ff,stroke:#2166ac,color:#000
+    classDef gap fill:#f5f5f5,stroke:#888,color:#444,stroke-dasharray: 5 5
+    class FC,RES api
+    class KC,WIND,SURGE,RAIN,FAC,OUT da
+    class POP gap
+```
+
+### The impact model is a third-party commercial product
+
+PDC does not compute the cyclone impact estimates. All three impact
+layers carry the same statement:
+
+> Estimated Wind Impacts are calculated using (KineticCast™ Model)
+> model and **provided as a subscription service to PDC by Kinetic AC**.
+
+Kinetic Analysis Corporation is Charles Watson's company, and TAOS
+("The Arbiter of Storms") is his model — a numerical model producing
+maximum sustained surface winds, still-water surge heights and
+deep-water wave heights, first installed at CIMH in 1994 and adapted as
+TAOS/L for the OAS Caribbean Disaster Mitigation Project. KineticCast is
+its commercial descendant.
+
+That lineage is preserved in the payload. Every cyclone record carries a
+`taosArchive` field, and its filename decodes cleanly:
+
+```
+kinetic_60as_1785769547237_4307099.zip
+   │       │         │           └── global job counter
+   │       │         └── model run time (epoch ms)
+   │       └── 60 arc-seconds ≈ 1.85 km at the equator
+   └── Kinetic(Cast)
+```
+
+The `60as` resolution is **constant across every record we have
+captured**, for both NHC- and JTWC-sourced storms — so the method is
+uniform globally, and there is no reason to expect Atlantic/East-Pacific
+exposure to be computed differently from the Western Pacific storm we
+observed. The run timestamp also explains the publication timing: the
+hazard record updates 18–41 seconds after the model run completes, so
+the ~2.5 h gap after the synoptic hour is *model runtime*, not ingest
+lag.
+
+The practical consequence is about who can answer questions. Methodology
+questions belong to Kinetic AC, not PDC, and a subscription contract is
+a plausible reason the inputs are not published.
+
+### The damage bands are damage ratios, which is why they are not wind bands
+
+The band labels give it away once you read them as a modeller would:
+**"Moderate Damage; 5% of value"** is a *damage ratio* — percent of
+capital value lost. That is the output of a damage function, not a wind
+threshold.
+
+This matters because the obvious hypothesis — that the three bands are
+just the 34/50/64 kt rings relabelled — is tempting and wrong. It is
+also testable, because `impactGeometry` contains three separate
+polygons, one per `exposureLevel`. Comparing each against a swath built
+from PDC's *own* quadrant radii along the same track:
+
+| Band | Description | Band area | Paired swath | Swath area | ratio |
+|---|---|---|---|---|---|
+| 1 | Minor Damage; power out | 23.3 | 34 kt | 205.8 | 0.11 |
+| 2 | Moderate Damage; 5% of value | 31.0 | 50 kt | 82.4 | 0.38 |
+| 3 | Widespread Damage and Above | **56.6** | 64 kt | 35.3 | 1.60 |
+
+Three independent refutations. The **areas run backwards** — "Widespread
+Damage" has the largest footprint and "Minor Damage" the smallest, when
+64 kt must be innermost and smallest. The **bands are not nested** —
+band 1 does not contain band 2, so they are not concentric rings at all.
+And **overlap is poor**: IoU of band 1 against the 34 kt swath is
+`0.104`, when that pairing should be the strongest.
+
+One coincidence nearly sold it. For Japan the GDACS/PDC *population*
+ratio at 64 kt is 1.95, and the circle-versus-quadrant *area* ratio at
+64 kt is also 1.95 — which looks like confirmation that band 3 is the
+64 kt figure computed on a quadrant polygon while GDACS sweeps a
+max-radius circle. The geometry says otherwise. It is worth recording
+precisely because it is the kind of number that would justify shipping a
+wrong mapping into an operational alert.
+
+So PDC exposure cannot be placed in a 34/50/64 kt column, and no
+additional storms will change that — the refutation is structural, not
+sampling noise.
+
+### The facility counts are a merged inventory of uneven coverage
+
+`capital.school` and `capital.hospital` come from PDC's own global
+layers rather than from Kinetic AC. The schools layer states:
+
+> PDC Global School data... uses various public sources such as
+> **OpenStreetMap (HOT)** and merges it with the best available
+> **National and NDPBA** data sources.
+
+with tags confirming **HOT/OpenStreetMap, HIFLD and NDPBA**. That is a
+merged inventory whose completeness varies substantially by country: a
+low school count in a poorly-mapped country reflects poor mapping, not
+few schools. Per-feature provenance does survive — the lineage note says
+data and geometry sources are retained as feature attributes — but the
+aggregate count in `exposure.data` does not carry it.
+
+Two flags for anyone thinking of publishing these numbers. The layer
+carries a **"For non-commercial use only"** usage constraint, the first
+hard licence restriction we have encountered in this source; humanitarian
+use is very likely fine, but the constraint attaches to data that would
+be redistributed. And it is unclear whether `capital.school` aggregates
+all three school sub-layers (colleges, elementary/secondary, preschools)
+or only one.
+
+### The population input is undocumented
+
+The layer that matters most is the one we have not been able to pin
+down. `population.total`, the five-year age bands, `vulnerable` and
+`households` — every figure we would actually consider using — come from
+a population grid that is named nowhere: not in the API payload (a
+search for LandScan, WorldPop, GPW, GHSL, HRSL, CIESIN and others
+returns nothing), not in PDC's published documentation, and not in the
+impact-layer metadata, which describes only the hazard products.
+
+What the output structure implies, without confirming: five-year age
+bands to 100+ and an age-split `vulnerable` figure require an
+**age-structured** population product, which rules out plain LandScan
+Global; `households` requires a household-size or household-count layer.
+And the 60 arc-second grid is twice as coarse as the common 30
+arc-second global products, consistent with aggregating a ~1 km grid for
+speed — which would rule out the 100 m products as a direct input.
+
+Both are inferences from the shape of the output, not evidence. The
+answer is one layer-metadata panel away in DisasterAWARE
+(`Global Data > Population Density`), and it is worth getting before any
+PDC population figure is published, because the choice of grid is the
+single largest determinant of whether PDC's numbers should agree with
+GDACS, ADAM or CHD at all.
 
 ## The structural limitation is real, and different from what we thought
 
