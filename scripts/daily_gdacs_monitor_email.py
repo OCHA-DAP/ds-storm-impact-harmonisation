@@ -47,7 +47,10 @@ from src.gdacs_monitor_email import (  # noqa: E402
 
 load_dotenv()
 
-TEST_LIST_ID = 25
+# Listmonk list 101 "Storm Alerts - Monitoring" — exactly three subscribers
+# (Zack Arno, Leonardo Milano, Tristan Downing), verified 2026-08-04. Single
+# opt-in, so "unconfirmed" subscribers still receive campaigns.
+MONITOR_LIST_ID = 101
 TEST_PREFIX = "[test] "  # Prefixed onto BOTH the campaign name and the
                          # subject. The name-prefix triggers OCHA Listmonk's
                          # test-variant template (Go side); the subject
@@ -198,8 +201,8 @@ def main():
     parser.add_argument(
         "--list-id",
         type=int,
-        default=TEST_LIST_ID,
-        help=f"Listmonk list ID to target (default: {TEST_LIST_ID}).",
+        default=MONITOR_LIST_ID,
+        help=f"Listmonk list ID to target (default: {MONITOR_LIST_ID}).",
     )
     parser.add_argument(
         "--auto-send",
