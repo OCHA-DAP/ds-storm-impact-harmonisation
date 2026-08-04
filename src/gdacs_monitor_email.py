@@ -213,8 +213,7 @@ def build_ridgeline_png(
         ax.text(lx, pdc_h * .10, "damage class", ha="right", va="center",
                 fontsize=7.2, color=INK_3)
         ax.text(x_end + (hi - lo) * .012, pdc_h / 2,
-                f"{pdc_total / 1e6:.2f}M" if pdc_total >= 1e6
-                else f"{pdc_total:,.0f}",
+                _abbrev(pdc_total),
                 ha="left", va="center", fontsize=8, color=ACCENT,
                 fontweight="bold")
 
@@ -235,13 +234,13 @@ def build_ridgeline_png(
 
     handles = [
         Line2D([], [], marker="o", ls="", mfc=INK, mec="white", ms=7,
-               label="this storm"),
+               label="this storm (GDACS)"),
         Line2D([], [], color=GREY_EDGE, lw=6, alpha=.5,
                label=f"{country} storm history (GDACS)"),
     ]
     if has_pdc:
         handles.append(Line2D([], [], color=ACCENT, lw=6, alpha=.9,
-                              label="PDC damage classes (width = share)"))
+                              label="PDC damage classes (width = % share)"))
     ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(0, -0.30),
               ncol=3, frameon=False, fontsize=7.8, handlelength=1.6,
               labelcolor=INK_3)
@@ -278,6 +277,33 @@ def _st(fam: str, size: str, weight: int = 400, lh: float = 1.5,
 
 def _fmt(n: float) -> str:
     return f"{int(n):,}"
+
+
+def _abbrev(n: float) -> str:
+    """Three significant figures with a unit suffix: 149M, 11.9M, 93.5K.
+
+    Full-precision counts crowd the country header and are not decision-
+    relevant at this scale; the exact value stays in the tooltip-free table
+    of the book and in the raw capture.
+    """
+    n = float(n)
+    for div, suf in ((1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if abs(n) >= div:
+            v = n / div
+            if v >= 100:
+                return f"{v:.0f}{suf}"
+            return f"{v:.3g}{suf}"
+    return f"{int(n):,}"
+
+
+def _class_name(description: str) -> str:
+    """Short PDC class name for headline use.
+
+    PDC ships e.g. "Moderate Damage; 5% of value" — the clause after the
+    semicolon is a damage-ratio gloss that reads as noise beside a number.
+    Keep the name here; the full strings are defined in the footer.
+    """
+    return (description or "").split(";")[0].strip()
 
 
 def _alert_chip(level: str) -> str:
@@ -360,7 +386,7 @@ def _country_block_html(
 
     gd_rows = "".join(
         f"<div style=\"margin-bottom:2px;\">"
-        f"<b style=\"{_st(SANS, '17px', 700, 1.25, INK)}\">{_fmt(v)}</b>"
+        f"<b style=\"{_st(SANS, '17px', 700, 1.25, INK)}\">{_abbrev(v)}</b>"
         f"<span style=\"{_st(MONO, '11px', 400, 1.25, INK_3)}\">"
         f" at {sp} kt</span></div>"
         for sp, v in sorted(current.items()) if v and v > 0
@@ -379,9 +405,9 @@ def _country_block_html(
             f"border-radius:2px;background:"
             f"{PDC_SEVERITY_COLORS.get(str(r.level), INK_3)};\"></span>"
             f"<b style=\"{_st(SANS, '14px', 700, 1.3, INK)}\">"
-            f" {_fmt(r.pop_total)}</b>"
+            f" {_abbrev(r.pop_total)}</b>"
             f"<span style=\"{_st(SANS, '11.5px', 400, 1.3, INK_2)}\">"
-            f" {r.description}</span></div>"
+            f" {_class_name(r.description)}</span></div>"
             for r in rows
         )
         pdc_cell = (
@@ -484,11 +510,11 @@ def _header_html(ts: datetime, n: int) -> str:
     duplicates the wrapper. This adds only what the wrapper cannot know.
     """
     return (
-        f"<div style=\"font-family:{SANS};font-size:15px;line-height:1.6;"
-        f"font-weight:400;color:{INK_2};margin:0 0 22px;\">"
+        f"<div style=\"{_st(SANS, '15px', 400, 1.6, INK_2)}"
+        f"margin:0 0 22px;\">"
+        f"{ts:%d %B %Y, %H:%M} UTC &nbsp;&middot;&nbsp; "
         f"<b style=\"color:{INK};font-weight:700;\">{n} active tropical "
-        f"cyclone{'s' if n != 1 else ''}</b> in GDACS, with PDC severity where "
-        f"available &middot; {ts:%d %B %Y, %H:%M} UTC</div>"
+        f"cyclone{'s' if n != 1 else ''}</b></div>"
     )
 
 
@@ -510,12 +536,17 @@ def _footer_html() -> str:
                "exposure at that wind threshold; the dot is this storm. "
                "&ldquo;Not reached&rdquo; means the swath at that threshold does "
                "not touch the country at all.")
+        + note("PDC damage classes",
+               "PDC's own definitions, in its words: <b>Minor Damage</b> "
+               "&mdash; power out. <b>Moderate Damage</b> &mdash; 5% of value, "
+               "i.e. roughly 5% of built capital value lost. <b>Widespread "
+               "Damage and Above</b>. They are a modelled damage <i>ratio</i>, "
+               "not wind thresholds, and cannot be mapped onto 34/64 kt.")
         + note("PDC",
                "The blue bar is PDC's damage-class split, its right edge placed "
                "at PDC's total on the same axis. Segment widths are shares, not "
-               "axis distances &mdash; a log scale cannot stack additively. Damage "
-               "classes are a modelled damage <i>ratio</i>, not wind thresholds, "
-               "and PDC is admin-0 only with no historical archive, so it carries "
+               "axis distances &mdash; a log scale cannot stack additively. PDC is "
+               "admin-0 only with no historical archive, so it carries "
                "no return period. Facility counts come from a merged inventory "
                "(OpenStreetMap/HOT, HIFLD, NDPBA, national sources) whose "
                "completeness varies by country.")
