@@ -677,6 +677,53 @@ rather than geography.
 Reproduce: for each hazard, `GET /hazards/{uuid}` and compare
 `exposure.data.totalByAdmin` against `exposure.data.totalByCountry`.
 
+### Update lag behind the forecast centre
+
+**PDC publishes at bulletin issuance — its own ingest lag is effectively
+zero.** Measured 2026-08-03 by comparing each advisory's synoptic hour
+(the `valid_time` of track position 0, which is the advisory's own
+nowcast hour) against `incident.snapshot.properties.map.sourceUpdatedAt`:
+
+| Storm | Issuer | Advisory | Synoptic hour | `sourceUpdatedAt` | Lag |
+|---|---|---|---|---|---|
+| Dolphin `WP122026` | JTWC | 31 | 12:00Z | 15:00Z | **+3.00 h** |
+| Dolphin `WP122026` | JTWC | 32 | 18:00Z | 21:00Z | **+3.00 h** |
+| Genevieve `EP072026` | NHC | 39 | 21:00Z | 20:33Z | −0.45 h |
+
+Exactly +3.00 h twice for JTWC. That is the standard JTWC offset between
+the synoptic hour and advisory issuance, so PDC is publishing *when the
+forecast centre publishes*, not three hours behind it.
+
+`hazard.updatedAt` — the field this repo keys captured versions on —
+tracked `sourceUpdatedAt` to within 6 min (adv 31) and 44 min (adv 32).
+Note the two are not identical and can disagree in either direction;
+`sourceUpdatedAt` looks like the advisory's nominal issuance stamp while
+`hazard.updatedAt` is when PDC's record actually changed.
+
+**Trap: `eventTime` is not the advisory time.** It equals
+`hazard.startedAt` (storm formation), so differencing against it yields
+the storm's age, not a lag — 183 to 221 h in these samples. Use track
+position 0's `forecastDateUserPref`, or `sourceUpdatedAt`.
+
+**Confidence.** Two JTWC advisories of one storm. The single NHC sample
+is a *post-tropical final* advisory and shows a negative lag, which is
+not trustworthy — final advisories are issued off-cycle. There is still
+**no reliable Atlantic/East-Pacific measurement**, which is the basin
+that matters for the alert pipeline.
+
+**Consequence for alerting.** The storm alert email fires on NHC
+advisory issuance. If PDC publishes at issuance, PDC data is available
+at essentially the same moment — but `scripts/poll_pdc_cyclones.py`
+runs 3-hourly, so the *archive* can be up to 3 h stale at alert time.
+A consumer that needs advisory-fresh PDC data should call the API
+directly (a `/hazards` + detail round-trip is ~1 s) rather than read
+the capture. The archive exists for the historical record, which is a
+different job from alert freshness.
+
+Re-measure with `scripts/poll_pdc_cyclones.py` captures: for each
+version, compare `parse_track(d).iloc[0]["valid_time"]` against
+`sourceUpdatedAt` and `hazard.updatedAt`.
+
 ### Same bulletin as GDACS
 
 At advisory 31 PDC and GDACS agreed **exactly** on position
@@ -702,6 +749,7 @@ while PDC computes against the current `impactGeometry`.
 | 6 | Historical access | **Open, and worse** — no history even for live storms |
 | 7 | Filters and pagination | **Open** — unchanged |
 | 8 | Joining to IBTrACS | **Resolved** — exact join via `atcfId` |
+| + | *(added 2026-08-03)* Update lag behind the forecast centre | **Measured** — PDC publishes at bulletin issuance, ingest lag ~0. Two JTWC advisories; no reliable NHC/in-basin sample yet. See [Update lag](#update-lag-behind-the-forecast-centre) |
 
 Still unobserved: everything landfall-related (`landfallAdmin0`,
 `landfallTime`, `hoursLandfall`, `categoryLandfall`,
