@@ -5,10 +5,17 @@ Reads the raw responses archived by `scripts/poll_pdc_cyclones.py` and turns
 them into frames shaped like the GDACS equivalents in `gdacs.py`, so the two
 sources can be compared directly.
 
-This module deliberately does **no** fetching beyond blob reads. PDC serves no
-archive and no track history, so the only PDC data we will ever have is what
-the poller captured at the time; parsing is kept separate from capture so that
-changing the parse never requires re-fetching something unre-fetchable.
+Parsing is kept separate from capture: PDC serves no archive and no track
+history, so the only PDC data we will ever have is what the poller captured at
+the time, and changing the parse must never require re-fetching something
+unre-fetchable.
+
+Live reads (:func:`fetch_active_cyclones`, :func:`fetch_detail`) exist for
+*consumers that need advisory-fresh data*, such as the daily GDACS monitor
+email. PDC publishes at bulletin issuance while the poller runs 3-hourly, so
+the blob archive can be up to 3 h stale at send time; an alert should call the
+API. The archive's job is the historical record, which is a different job from
+alert freshness. See `docs/pdc_api.md` § Update lag.
 
 Reference for the API and its schema traps: `docs/pdc_api.md`.
 
@@ -35,13 +42,18 @@ Schema traps handled here
 from __future__ import annotations
 
 import json
+import os
+import re
 from typing import Any
 
 import ocha_stratus as stratus
 import pandas as pd
+import requests
 
 BLOB_PREFIX = "ds-storm-impact-harmonisation/raw/pdc/cyclones"
 CONTAINER = "projects"
+PDC_BASE = "https://hazards-api.pdc.org"
+TIMEOUT = 60
 
 #: `endedAt` value PDC uses to mean "still active" (2999-12-31T23:59:59Z).
 ACTIVE_SENTINEL = 32503679999
@@ -88,6 +100,75 @@ def unwrap(obj: Any) -> Any:
 # --------------------------------------------------------------------------
 # Loading captured records
 # --------------------------------------------------------------------------
+
+
+def _headers() -> dict[str, str]:
+    key = os.environ.get("PDC_API_KEY")
+    if not key:
+        raise RuntimeError("PDC_API_KEY is not set")
+    return {"x-api-key": key}
+
+
+def fetch_active_cyclones() -> list[dict]:
+    """Live `GET /hazards?types=CYCLONE` — the list-view properties.
+
+    Returns the `properties` dict of each feature (uuid, name, type,
+    severity, category, startedAt/updatedAt/endedAt). Use
+    :func:`fetch_detail` on a `uuid` for exposure and track.
+    """
+    r = requests.get(
+        f"{PDC_BASE}/hazards",
+        params={"types": "CYCLONE"},
+        headers=_headers(),
+        timeout=TIMEOUT,
+    )
+    r.raise_for_status()
+    return [f.get("properties", {}) for f in r.json().get("features", [])]
+
+
+def fetch_detail(hazard_uuid: str) -> dict:
+    """Live `GET /hazards/{uuid}`, Avro-unwrapped and ready for the parsers."""
+    r = requests.get(
+        f"{PDC_BASE}/hazards/{hazard_uuid}", headers=_headers(), timeout=TIMEOUT
+    )
+    r.raise_for_status()
+    return unwrap(r.json())
+
+
+def _name_key(name: str) -> str:
+    """Reduce a storm name to its bare token for cross-source matching.
+
+    GDACS names storms ``DOLPHIN-26``; PDC names the same storm
+    ``Typhoon Dolphin`` or ``Post-Tropical Cyclone Genevieve``. Stripping the
+    GDACS year suffix and PDC's status words leaves ``DOLPHIN`` on both sides.
+    """
+    n = re.sub(r"-\d{2}$", "", (name or "").strip().upper())
+    for word in (
+        "SUPER TYPHOON", "TYPHOON", "POST-TROPICAL CYCLONE", "TROPICAL CYCLONE",
+        "TROPICAL STORM", "TROPICAL DEPRESSION", "HURRICANE", "CYCLONE",
+        "SUBTROPICAL STORM", "STORM",
+    ):
+        n = n.replace(word, " ")
+    n = re.sub(r"\(.*?\)", " ", n)          # drop "(Response Support)" etc.
+    return re.sub(r"[^A-Z]", "", n)
+
+
+def match_gdacs_name(gdacs_name: str, pdc_records: list[dict]) -> dict | None:
+    """Find the PDC record for a GDACS storm name, or None.
+
+    Matches on the bare storm token. Only `category == "EVENT"` records are
+    considered: `RESPONSE` records are analyst-entered coordination snapshots
+    whose exposure is unfit for quantitative use (see `docs/pdc_api.md`).
+    """
+    key = _name_key(gdacs_name)
+    if not key:
+        return None
+    for rec in pdc_records:
+        if rec.get("category") != "EVENT":
+            continue
+        if _name_key(rec.get("name", "")) == key:
+            return rec
+    return None
 
 
 def list_captured_versions(stage: str = "dev") -> pd.DataFrame:
@@ -186,8 +267,13 @@ def parse_meta(detail: dict) -> dict:
         "max_winds_kph": m.get("maxWindsKph"),
         "pressure": m.get("pressure"),
         "region": m.get("region"),
+        # Landfall block: null until the storm is close enough for the model
+        # to resolve one. First observed populated on Dolphin adv 35.
         "landfall_admin0": m.get("landfallAdmin0"),
+        "landfall_admin1": m.get("landfallAdmin1"),
         "landfall_time": m.get("landfallTime"),
+        "hours_landfall": m.get("hoursLandfall"),
+        "category_landfall": m.get("categoryLandfall"),
     }
 
 
@@ -297,6 +383,33 @@ def parse_exposure_bands(detail: dict) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
+
+
+def parse_bands_by_country(detail: dict) -> pd.DataFrame:
+    """Damage-class exposure split by country.
+
+    `exposureLevels[].data` carries its own nested `totalByCountry`, so the
+    grain available is (country x damage band). Returns columns ``iso3``,
+    ``level``, ``description``, ``pop_total``; empty when PDC computed no
+    exposure.
+    """
+    data = (detail.get("exposure", {}) or {}).get("data", {}) or {}
+    rows = []
+    for level in data.get("exposureLevels") or []:
+        ld = level.get("data") or {}
+        for entry in ld.get("totalByCountry") or []:
+            pop = (entry.get("population") or {}).get("total")
+            rows.append(
+                {
+                    "iso3": entry.get("country"),
+                    "level": level.get("level"),
+                    "description": level.get("exposureDescription"),
+                    "pop_total": _value(pop) or 0.0,
+                }
+            )
+    return pd.DataFrame(
+        rows, columns=["iso3", "level", "description", "pop_total"]
+    )
 
 
 # --------------------------------------------------------------------------
