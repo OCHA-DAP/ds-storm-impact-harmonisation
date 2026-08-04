@@ -30,25 +30,50 @@ OCHA_HISTORICAL_BLOB = (
 )
 BUFFER_TO_SPEED = {"buffer39": 34, "buffer74": 64}
 
-# Sequential blue ramp, light -> dark = minor -> widespread. Severity is an
-# ORDERED scale, so it gets a one-hue ramp rather than categorical hues.
-PDC_SEVERITY_COLORS = {"1": "#b7d3f6", "2": "#3987e5", "3": "#164a8c"}
-PDC_SEVERITY_LABEL = {"1": "minor", "2": "moderate", "3": "widespread"}
 SPEEDS = [34, 64]          # the two GDACS getimpact publishes
 
-# Palette. Cool-biased neutrals; one accent. Email is light-ground only.
-INK = "#0e1419"
-INK_2 = "#48535e"
-INK_3 = "#7b858f"
-LINE = "#e2e7eb"
-GROUND = "#f5f7f8"
-ACCENT = "#164a8c"
-GREY_FILL = "#c9d1d9"
-GREY_EDGE = "#8d97a1"
-ALERT_COLORS = {"green": "#0ca30c", "orange": "#e07b1a", "red": "#d03b3b"}
-SANS = ("-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,"
+# ---------------------------------------------------------------------------
+# HDX v2 design tokens (methods/style-guide.md in the team KB; mirror in
+# ds-knowledge-base-internal/style-reference/tokens.md). Values are lifted
+# rather than imported because email cannot pull the HDX CSS bundle — the
+# style guide sanctions exactly this for apps that can't import wholesale.
+# ---------------------------------------------------------------------------
+INK = "#1f2324"        # --hdx-neutral-9
+INK_2 = "#5e6a6b"      # --hdx-neutral-7
+INK_3 = "#7e8e8f"      # --hdx-neutral-6
+LINE = "#e2e8e8"       # --hdx-neutral-15
+GROUND = "#f5f7f7"     # --hdx-neutral-05
+PANEL = "#ffffff"      # --hdx-neutral-0
+GREY_FILL = "#d8e0e1"  # --hdx-neutral-2
+GREY_EDGE = "#9db1b3"  # --hdx-neutral-5
+
+# GDACS alert levels map onto the HDX status ramp, which is what it is for.
+ALERT_COLORS = {
+    "green": "#2f9e6f",    # --hdx-success-5
+    "orange": "#d48f2a",   # --hdx-warning-5
+    "red": "#c44536",      # --hdx-error-5
+}
+
+# PDC severity is an ORDERED scale, so it takes a one-hue sequential ramp.
+# The style guide's default sequential is the BRAND ramp, but brand is HDX
+# teal-green and "widespread damage" rendered green reads as reassurance.
+# Using the PRIMARY ramp instead — still an HDX token family, semantically
+# neutral. Deviation is deliberate; noted here so it is not mistaken for drift.
+ACCENT = "#134ead"     # --hdx-primary-6
+SEQ_1 = "#a3c0ef"      # --hdx-primary-2  minor
+SEQ_2 = "#1862d8"      # --hdx-primary-5  moderate
+SEQ_3 = "#0a2756"      # --hdx-primary-8  widespread
+
+# --hdx-font-body / --hdx-font-display, with email-safe fallbacks: webfonts
+# are unreliable in mail clients, so the stacks degrade rather than vanish.
+SANS = ("Roboto,-apple-system,BlinkMacSystemFont,'Segoe UI',"
         "Helvetica,Arial,sans-serif")
+DISPLAY = "Merriweather,Georgia,'Times New Roman',serif"
 MONO = "ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"
+
+# Light -> dark = minor -> widespread, monotonic in lightness by construction.
+PDC_SEVERITY_COLORS = {"1": SEQ_1, "2": SEQ_2, "3": SEQ_3}
+PDC_SEVERITY_LABEL = {"1": "minor", "2": "moderate", "3": "widespread"}
 
 
 # ----------------------------------------------------------------------------
@@ -124,8 +149,13 @@ def build_ridgeline_png(
             lo, hi = min(lo, np.log10(v) - 0.35), max(hi, np.log10(v) + 0.35)
     grid = np.linspace(lo, hi, 400)
 
+    # Style guide: "Roboto for chart text". Not installed here, so the stack
+    # degrades to the nearest grotesque rather than matplotlib's DejaVu default.
+    plt.rcParams["font.family"] = "sans-serif"
+    plt.rcParams["font.sans-serif"] = ["Roboto", "Helvetica Neue", "Helvetica",
+                                       "Arial", "DejaVu Sans"]
     fig, ax = plt.subplots(figsize=(6.9, 3.15 if has_pdc else 2.6), dpi=150)
-    fig.patch.set_facecolor("white")
+    fig.patch.set_facecolor(PANEL)
     row_h, gap, pdc_h = 1.0, 0.55, 0.34
     y0 = (pdc_h + 0.52) if has_pdc else 0.0
     lx = lo - (hi - lo) * 0.045
@@ -138,7 +168,7 @@ def build_ridgeline_png(
             ax.fill_between(grid, base, base + dens * row_h, color=GREY_FILL,
                             alpha=.85, linewidth=0, zorder=2)
             ax.plot(grid, base + dens * row_h, color=GREY_EDGE, lw=1, zorder=3)
-        ax.plot([grid[0], grid[-1]], [base, base], color="#dfe4e9", lw=.8, zorder=1)
+        ax.plot([grid[0], grid[-1]], [base, base], color=LINE, lw=.8, zorder=1)
         ax.text(lx, base + row_h * .40, f"{speed} kt", ha="right", va="center",
                 fontsize=10.5, color=INK, fontweight="bold")
         ax.text(lx, base + row_h * .13, f"{vals.size} storms", ha="right",
@@ -147,7 +177,7 @@ def build_ridgeline_png(
         cur = current.get(speed)
         if cur and cur > 0:
             ax.plot([np.log10(cur)], [base + .055], marker="o", ms=8, mfc=INK,
-                    mec="white", mew=1.4, zorder=6)
+                    mec=PANEL, mew=1.4, zorder=6)
         else:
             ax.text(lx, base - row_h * .10, "not reached", ha="right",
                     va="center", fontsize=7, color=INK_3, style="italic")
@@ -169,10 +199,10 @@ def build_ridgeline_png(
             w = span * (val / total)
             ax.add_patch(plt.Rectangle((left, 0), w, pdc_h,
                                        facecolor=PDC_SEVERITY_COLORS[lvl],
-                                       edgecolor="white", lw=1.2, zorder=4))
+                                       edgecolor=PANEL, lw=1.2, zorder=4))
             if w / span > .14:
                 # White fails on the pale step (#b7d3f6 ~1.5:1); use ink there.
-                txt = INK if lvl == "1" else "white"
+                txt = INK if lvl == "1" else PANEL
                 ax.text(left + w / 2, pdc_h / 2,
                         f"{val / total * 100:.0f}% {PDC_SEVERITY_LABEL[lvl]}",
                         ha="center", va="center", fontsize=7.6, color=txt,
@@ -199,15 +229,15 @@ def build_ridgeline_png(
     ax.set_yticks([])
     for side in ("left", "right", "top"):
         ax.spines[side].set_visible(False)
-    ax.spines["bottom"].set_color("#dfe4e9")
-    ax.tick_params(axis="x", length=3, color="#dfe4e9")
+    ax.spines["bottom"].set_color(LINE)
+    ax.tick_params(axis="x", length=3, color=LINE)
     ax.set_xlabel("population exposed (log scale)", fontsize=8, color=INK_3)
 
     handles = [
         Line2D([], [], marker="o", ls="", mfc=INK, mec="white", ms=7,
                label="this storm"),
         Line2D([], [], color=GREY_EDGE, lw=6, alpha=.5,
-               label=f"{country} storm history"),
+               label=f"{country} storm history (GDACS)"),
     ]
     if has_pdc:
         handles.append(Line2D([], [], color=ACCENT, lw=6, alpha=.9,
@@ -218,7 +248,7 @@ def build_ridgeline_png(
 
     fig.tight_layout()
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight", facecolor="white")
+    fig.savefig(buf, format="png", bbox_inches="tight", facecolor=PANEL)
     plt.close(fig)
     return buf.getvalue()
 
@@ -235,6 +265,17 @@ def png_to_data_uri(png: bytes) -> str:
 # ----------------------------------------------------------------------------
 
 
+def _st(fam: str, size: str, weight: int = 400, lh: float = 1.5,
+        color: str = "", extra: str = "") -> str:
+    """Inline style string. Longhand only — mail clients strip the `font:`
+    shorthand, which silently flattened this email's whole type hierarchy."""
+    out = (f"font-family:{fam};font-size:{size};line-height:{lh};"
+           f"font-weight:{weight};")
+    if color:
+        out += f"color:{color};"
+    return out + extra
+
+
 def _fmt(n: float) -> str:
     return f"{int(n):,}"
 
@@ -243,7 +284,7 @@ def _alert_chip(level: str) -> str:
     c = ALERT_COLORS.get(str(level).lower(), INK_3)
     return (
         f"<span style=\"display:inline-block;padding:2px 8px;border-radius:3px;"
-        f"background:{c};color:#fff;font:600 10px/1.6 {MONO};"
+        f"background:{c};color:#fff;{_st(MONO,'10px',600,1.6,"")}"
         f"letter-spacing:.08em;text-transform:uppercase;\">{level}</span>"
     )
 
@@ -265,9 +306,9 @@ def _landfall_html(meta: dict) -> str:
         cells.append(("At landfall", f"Category {int(float(cat))}"))
     tds = "".join(
         f"<td style=\"padding:0 22px 0 0;vertical-align:top;\">"
-        f"<div style=\"font:500 9.5px/1.6 {MONO};letter-spacing:.1em;"
+        f"<div style=\"{_st(MONO,'9.5px',500,1.6,"")}letter-spacing:.1em;"
         f"text-transform:uppercase;color:{INK_3};\">{k}</div>"
-        f"<div style=\"font:600 16px/1.3 {SANS};color:{INK};\">{v}</div></td>"
+        f"<div style=\"{_st(SANS,'16px',600,1.3,INK)}\">{v}</div></td>"
         for k, v in cells
     )
     return (
@@ -275,7 +316,7 @@ def _landfall_html(meta: dict) -> str:
         f"style=\"width:100%;margin:0 0 22px;background:#eef4fb;"
         f"border-left:3px solid {ACCENT};border-radius:0 6px 6px 0;\">"
         f"<tr><td style=\"padding:14px 18px;\">"
-        f"<div style=\"font:600 9.5px/1.6 {MONO};letter-spacing:.12em;"
+        f"<div style=\"{_st(MONO,'9.5px',600,1.6,"")}letter-spacing:.12em;"
         f"text-transform:uppercase;color:{ACCENT};margin-bottom:8px;\">"
         f"PDC landfall forecast</div>"
         f"<table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\">"
@@ -298,7 +339,7 @@ def _pdc_facts(exposure_row: pd.Series) -> str:
     if not bits:
         return ""
     return (
-        f"<div style=\"font:400 11.5px/1.7 {MONO};color:{INK_3};"
+        f"<div style=\"{_st(MONO,'11.5px',400,1.7,INK_3)}"
         f"margin:2px 0 0;\">also in PDC footprint &nbsp;"
         + " &nbsp;&middot;&nbsp; ".join(bits) + "</div>"
     )
@@ -306,23 +347,70 @@ def _pdc_facts(exposure_row: pd.Series) -> str:
 
 def _country_block_html(
     country: str, iso3: str, current: dict[int, float], png_uri: str,
-    pdc_row: pd.Series | None,
+    pdc_row: pd.Series | None, pdc_bands: pd.DataFrame | None,
 ) -> str:
-    nums = "".join(
-        f"<span style=\"margin-right:18px;\">"
-        f"<b style=\"font:600 17px/1.2 {SANS};color:{INK};\">{_fmt(v)}</b>"
-        f"<span style=\"font:400 11px/1.2 {MONO};color:{INK_3};\">"
-        f" at {sp} kt</span></span>"
+    """Country header (GDACS | PDC side by side), panel, then PDC extras.
+
+    PDC's class names are its own `exposureDescription` strings verbatim —
+    "Moderate Damage; 5% of value" is the tell that these are damage ratios,
+    and paraphrasing it to "moderate" throws that away.
+    """
+    lab = _st(MONO, "9.5px", 600, 1.6, INK_3,
+              "letter-spacing:.1em;text-transform:uppercase;")
+
+    gd_rows = "".join(
+        f"<div style=\"margin-bottom:2px;\">"
+        f"<b style=\"{_st(SANS, '17px', 700, 1.25, INK)}\">{_fmt(v)}</b>"
+        f"<span style=\"{_st(MONO, '11px', 400, 1.25, INK_3)}\">"
+        f" at {sp} kt</span></div>"
         for sp, v in sorted(current.items()) if v and v > 0
-    )
+    ) or (f"<div style=\"{_st(SANS, '13px', 400, 1.5, INK_3)}\">"
+          f"no exposure</div>")
+
+    if pdc_bands is not None and not pdc_bands.empty:
+        order = {"3": 0, "2": 1, "1": 2}
+        rows = sorted(
+            (r for r in pdc_bands.itertuples() if float(r.pop_total) > 0),
+            key=lambda r: order.get(str(r.level), 9),
+        )
+        pdc_rows = "".join(
+            f"<div style=\"margin-bottom:2px;\">"
+            f"<span style=\"display:inline-block;width:9px;height:9px;"
+            f"border-radius:2px;background:"
+            f"{PDC_SEVERITY_COLORS.get(str(r.level), INK_3)};\"></span>"
+            f"<b style=\"{_st(SANS, '14px', 700, 1.3, INK)}\">"
+            f" {_fmt(r.pop_total)}</b>"
+            f"<span style=\"{_st(SANS, '11.5px', 400, 1.3, INK_2)}\">"
+            f" {r.description}</span></div>"
+            for r in rows
+        )
+        pdc_cell = (
+            f"<td style=\"vertical-align:top;padding-left:26px;\">"
+            f"<div style=\"{lab}margin-bottom:5px;\">PDC damage class</div>"
+            f"{pdc_rows}</td>"
+        )
+    else:
+        pdc_cell = (
+            f"<td style=\"vertical-align:top;padding-left:26px;\">"
+            f"<div style=\"{lab}margin-bottom:5px;\">PDC</div>"
+            f"<div style=\"{_st(SANS, '12.5px', 400, 1.5, INK_3)}\">"
+            f"no exposure computed for this country</div></td>"
+        )
+
     facts = _pdc_facts(pdc_row) if pdc_row is not None else ""
     return (
         f"<tr><td style=\"padding:18px 0 6px;border-top:1px solid {LINE};\">"
-        f"<div style=\"font:600 15px/1.4 {SANS};color:{INK};margin-bottom:2px;\">"
+        f"<div style=\"{_st(SANS, '15px', 700, 1.4, INK)}margin-bottom:10px;\">"
         f"{country}"
-        f"<span style=\"font:400 11px/1.4 {MONO};color:{INK_3};\"> {iso3}</span>"
+        f"<span style=\"{_st(MONO, '11px', 400, 1.4, INK_3)}\"> {iso3}</span>"
         f"</div>"
-        f"<div style=\"margin-bottom:10px;\">{nums}</div>"
+        f"<table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" "
+        f"style=\"margin-bottom:12px;\"><tr>"
+        f"<td style=\"vertical-align:top;\">"
+        f"<div style=\"{lab}margin-bottom:5px;\">GDACS exposed</div>"
+        f"{gd_rows}</td>"
+        f"{pdc_cell}"
+        f"</tr></table>"
         f"<img src=\"{png_uri}\" alt=\"{country} exposure vs history\" "
         f"style=\"display:block;width:100%;max-width:660px;height:auto;\" />"
         f"{facts}"
@@ -358,12 +446,13 @@ def _storm_section_html(
         png = build_ridgeline_png(iso3, names[iso3], historical, by_iso[iso3],
                                   pdc_bands, pdc_total)
         rows.append(_country_block_html(names[iso3], iso3, by_iso[iso3],
-                                        png_to_data_uri(png), pdc_row))
+                                        png_to_data_uri(png), pdc_row,
+                                        pdc_bands))
 
     if not rows:
         rows = [
             f"<tr><td style=\"padding:14px 0;border-top:1px solid {LINE};"
-            f"font:400 13px/1.6 {SANS};color:{INK_3};\">"
+            f"{_st(SANS,'13px',400,1.6,INK_3)}\">"
             f"No population exposed in this episode's GDACS footprint.</td></tr>"
         ]
 
@@ -375,9 +464,9 @@ def _storm_section_html(
         f"border-radius:8px;margin:0 0 20px;\">"
         f"<tr><td style=\"padding:22px 24px 24px;\">"
         f"<div style=\"margin-bottom:4px;\">{_alert_chip(storm['alert_level'])}</div>"
-        f"<div style=\"font:650 22px/1.2 {SANS};letter-spacing:-.02em;"
+        f"<div style=\"{_st(SANS,'22px',700,1.2,"")}letter-spacing:-.02em;"
         f"color:{INK};margin:6px 0 3px;\">{storm['name']}</div>"
-        f"<div style=\"font:400 11.5px/1.6 {MONO};color:{INK_3};"
+        f"<div style=\"{_st(MONO,'11.5px',400,1.6,INK_3)}"
         f"margin-bottom:18px;\">GDACS {storm['eventid']} &middot; since {frm}</div>"
         f"{landfall}"
         f"<table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" "
@@ -387,17 +476,19 @@ def _storm_section_html(
 
 
 def _header_html(ts: datetime, n: int) -> str:
+    """Summary line only.
+
+    Listmonk's OCHA template already renders the campaign subject as a header
+    bar and an "automated message produced by the OCHA Centre for Humanitarian
+    Data" strip above the body, so repeating a title and an OCHA eyebrow here
+    duplicates the wrapper. This adds only what the wrapper cannot know.
+    """
     return (
-        f"<div style=\"font:600 10px/1.6 {MONO};letter-spacing:.14em;"
-        f"text-transform:uppercase;color:{INK_3};\">OCHA Centre for "
-        f"Humanitarian Data</div>"
-        f"<div style=\"font:650 27px/1.15 {SANS};letter-spacing:-.024em;"
-        f"color:{INK};margin:8px 0 6px;\">Cyclone exposure monitor</div>"
-        f"<div style=\"font:400 14px/1.6 {SANS};color:{INK_2};"
-        f"margin-bottom:26px;\">"
-        f"<b style=\"color:{INK};\">{n} active tropical cyclone"
-        f"{'s' if n != 1 else ''}</b> in GDACS &middot; "
-        f"{ts:%d %B %Y, %H:%M} UTC</div>"
+        f"<div style=\"font-family:{SANS};font-size:15px;line-height:1.6;"
+        f"font-weight:400;color:{INK_2};margin:0 0 22px;\">"
+        f"<b style=\"color:{INK};font-weight:700;\">{n} active tropical "
+        f"cyclone{'s' if n != 1 else ''}</b> in GDACS, with PDC severity where "
+        f"available &middot; {ts:%d %B %Y, %H:%M} UTC</div>"
     )
 
 
@@ -405,9 +496,9 @@ def _footer_html() -> str:
     def note(title, body):
         return (
             f"<div style=\"margin-bottom:12px;\">"
-            f"<div style=\"font:600 9.5px/1.6 {MONO};letter-spacing:.1em;"
+            f"<div style=\"{_st(MONO,'9.5px',600,1.6,"")}letter-spacing:.1em;"
             f"text-transform:uppercase;color:{INK_3};\">{title}</div>"
-            f"<div style=\"font:400 12px/1.65 {SANS};color:{INK_3};\">{body}</div>"
+            f"<div style=\"{_st(SANS,'12px',400,1.65,INK_3)}\">{body}</div>"
             f"</div>"
         )
     return (
@@ -475,7 +566,7 @@ def build_stub_html(timestamp: datetime) -> str:
         f"style=\"width:100%;max-width:720px;text-align:left;\"><tr><td>"
         + _header_html(timestamp, 0)
         + f"<div style=\"background:#fff;border:1px solid {LINE};"
-        f"border-radius:8px;padding:24px;font:400 14px/1.6 {SANS};"
+        f"border-radius:8px;padding:24px;{_st(SANS,'14px',400,1.6,"")}"
         f"color:{INK_2};\">No active tropical cyclones in GDACS at this "
         f"issuance. The next check runs on the following synoptic cycle.</div>"
         + _footer_html()

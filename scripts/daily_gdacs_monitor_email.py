@@ -223,7 +223,7 @@ def main():
         print("Step 2: no active storms — stub email.", flush=True)
         html = build_stub_html(now)
         subject = (
-            f"{TEST_PREFIX}GDACS Monitor {now:%Y-%m-%d %H%M}Z:"
+            f"{TEST_PREFIX}GDACS & PDC Monitor {now:%Y-%m-%d %H%M}Z:"
             " no active storms"
         )
     else:
@@ -244,7 +244,7 @@ def main():
         )
         names = ", ".join(active["name"].tolist())
         subject = (
-            f"{TEST_PREFIX}GDACS Monitor {now:%Y-%m-%d %H%M}Z: {names}"
+            f"{TEST_PREFIX}GDACS & PDC Monitor {now:%Y-%m-%d %H%M}Z: {names}"
         )
 
     if args.dry_run:
