@@ -21,9 +21,35 @@ a detailed comparison of these two endpoints.
 import numpy as np
 import pandas as pd
 import requests
+from requests.adapters import HTTPAdapter
 from shapely.geometry import Polygon
+from urllib3.util.retry import Retry
 
 BASE_URL = "https://www.gdacs.org/gdacsapi/api"
+
+#: Connect/read timeout, seconds. requests defaults to NO timeout, which lets a
+#: hung GDACS connection block indefinitely — and a transient blip took out a
+#: scheduled monitor email on both 2026-08-03 and 2026-08-04.
+TIMEOUT = (10, 60)
+
+#: Retry transient failures rather than losing the whole cycle: GDACS is only
+#: polled every few hours, so a single blip otherwise costs a full interval.
+_RETRY = Retry(
+    total=4,
+    backoff_factor=1.5,          # 0s, 1.5s, 3s, 6s
+    status_forcelist=(429, 500, 502, 503, 504),
+    allowed_methods=frozenset(["GET"]),
+)
+
+
+def _session() -> requests.Session:
+    s = requests.Session()
+    s.mount("https://", HTTPAdapter(max_retries=_RETRY))
+    s.mount("http://", HTTPAdapter(max_retries=_RETRY))
+    return s
+
+
+SESSION = _session()
 
 IBTRACS_LAST3_URL = (
     "https://www.ncei.noaa.gov/data/international-best-track-archive"
@@ -80,7 +106,9 @@ def get_active_cyclones(
     if to_date:
         params["todate"] = to_date
 
-    r = requests.get(f"{BASE_URL}/events/geteventlist/SEARCH", params=params)
+    r = SESSION.get(
+        f"{BASE_URL}/events/geteventlist/SEARCH", params=params, timeout=TIMEOUT
+    )
     r.raise_for_status()
     features = r.json().get("features", [])
 
@@ -114,9 +142,10 @@ def get_active_cyclones(
 
 def get_event_detail(eventid: int) -> dict:
     """Fetch full event detail including impact URLs and episode list."""
-    r = requests.get(
+    r = SESSION.get(
         f"{BASE_URL}/events/geteventdata",
         params={"eventtype": "TC", "eventid": eventid},
+        timeout=TIMEOUT,
     )
     r.raise_for_status()
     return r.json()
@@ -130,13 +159,14 @@ def get_episode_detail(eventid: int, episodeid: int) -> dict:
     structure mirrors ``get_event_detail()``, but resource URLs
     (impact, timeline, locations) point to episode-specific data.
     """
-    r = requests.get(
+    r = SESSION.get(
         f"{BASE_URL}/events/getepisodedata",
         params={
             "eventtype": "TC",
             "eventid": eventid,
             "episodeid": episodeid,
         },
+        timeout=TIMEOUT,
     )
     r.raise_for_status()
     return r.json()
@@ -194,7 +224,7 @@ def get_timeline(eventid: int) -> pd.DataFrame:
     if timeline_url is None:
         raise ValueError(f"No timeline found for event {eventid}")
 
-    r = requests.get(timeline_url)
+    r = SESSION.get(timeline_url, timeout=TIMEOUT)
     r.raise_for_status()
     items = r.json().get("channel", {}).get("item", [])
 
@@ -260,7 +290,7 @@ def get_impact_by_country(
         for key in ["buffer39", "buffer74"]:
             if key not in resource:
                 continue
-            r = requests.get(resource[key])
+            r = SESSION.get(resource[key], timeout=TIMEOUT)
             r.raise_for_status()
             data = r.json()
             datums = data.get("datums", [])
