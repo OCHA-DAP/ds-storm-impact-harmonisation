@@ -26,6 +26,7 @@ Three modes:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -140,6 +141,13 @@ def fetch_pdc_for_storms(active: pd.DataFrame) -> dict:
     """
     out: dict = {}
     if active.empty:
+        return out
+    if not os.environ.get("PDC_API_KEY"):
+        # Distinct from a transient failure: this is misconfiguration, and it
+        # looks identical to "PDC has no data" in the rendered email.
+        print("  !! PDC_API_KEY is not set — every PDC panel will be MISSING "
+              "from this email. This is a configuration error, not an absence "
+              "of PDC data.", flush=True)
         return out
     try:
         records = pdc_mod.fetch_active_cyclones()

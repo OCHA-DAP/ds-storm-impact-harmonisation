@@ -39,6 +39,11 @@ jobs:
           DSCI_LISTMONK_BASE_URL: ${{ secrets.DSCI_LISTMONK_BASE_URL }}
           DSCI_LISTMONK_API_USERNAME: ${{ secrets.DSCI_LISTMONK_API_USERNAME }}
           DSCI_LISTMONK_API_KEY: ${{ secrets.DSCI_LISTMONK_API_KEY }}
+          # Without this the PDC panels silently vanish: the pipeline is
+          # deliberately fault-tolerant about PDC, so a missing key degrades to
+          # "no PDC panel" rather than failing the run, which reads exactly
+          # like PDC having no data for the storm.
+          PDC_API_KEY: ${{ secrets.PDC_API_KEY }}
         run: |
           ARGS=""
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
