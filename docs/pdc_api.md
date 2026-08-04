@@ -617,8 +617,47 @@ ADAM's, not cumulative like GDACS's `pop_34kt`/`pop_64kt`:
 | 3 | Widespread Damage and Above | 577,000 |
 
 Bands are labelled by **expected damage, not wind threshold**, and the
-model is undocumented (a `taosArchive` field hints at TAOS). The
-band-to-wind mapping is still unknown — do not guess it.
+model is undocumented (a `taosArchive` field hints at TAOS).
+
+#### The bands are NOT wind thresholds — tested and refuted
+
+The obvious hypothesis is that the three bands are just the 34 / 50 /
+64 kt rings relabelled. **They are not.** `impactGeometry.geoJson`
+contains three separate polygons, one per `exposureLevel`, so this is
+testable as pure geometry — no population raster needed. Each band
+polygon was compared against a swath built from PDC's *own* quadrant
+radii along the same forecast track (Dolphin adv 31):
+
+| Band | Description | Band area | Paired swath | Swath area | ratio |
+|---|---|---|---|---|---|
+| 1 | Minor Damage; power out | 23.3 | 34 kt | 205.8 | 0.11 |
+| 2 | Moderate Damage; 5% of value | 31.0 | 50 kt | 82.4 | 0.38 |
+| 3 | Widespread Damage and Above | **56.6** | 64 kt | 35.3 | 1.60 |
+
+Three independent refutations:
+
+1. **The areas run backwards.** "Widespread Damage" has the *largest*
+   footprint and "Minor Damage" the *smallest*. Under any wind-threshold
+   reading the 64 kt band is innermost and must be smallest.
+2. **The bands are not nested.** Band 1 does not contain band 2, and
+   band 2 does not contain band 3 — so they are not concentric rings at
+   all, and cannot be either cumulative or discrete wind bands.
+3. **Overlap is poor.** IoU of band 1 against the 34 kt swath is
+   **0.104**, and that is the pairing that should be strongest since
+   34 kt is the largest, best-constrained geometry. Reversing the order
+   (level 1 = most severe) is worse: band 1 vs 64 kt IoU is 0.004.
+
+**Beware one seductive coincidence.** For Japan the GDACS/PDC
+*population* ratio at 64 kt is 1.95, and the circle-vs-quadrant *area*
+ratio at 64 kt is also 1.95 — which looks like confirmation that band 3
+is the 64 kt exposure computed on a quadrant polygon while GDACS sweeps
+a max-radius circle. The geometry test above shows it is coincidence.
+Do not resurrect the mapping on the strength of that number.
+
+The bands are a damage-model output reflecting terrain, surge and
+building stock. Unless PDC documents the model, **PDC exposure cannot be
+placed in a 34/50/64 kt column**, and no additional storms will change
+that — the refutation is structural, not sampling noise.
 
 Genevieve returns zero exposure with empty `totalByCountry`, which is
 legitimate: it was post-tropical and offshore in the East Pacific. So
@@ -679,37 +718,76 @@ Reproduce: for each hazard, `GET /hazards/{uuid}` and compare
 
 ### Update lag behind the forecast centre
 
-**PDC publishes at bulletin issuance — its own ingest lag is effectively
-zero.** Measured 2026-08-03 by comparing each advisory's synoptic hour
-(the `valid_time` of track position 0, which is the advisory's own
-nowcast hour) against `incident.snapshot.properties.map.sourceUpdatedAt`:
+**PDC publishes roughly 2.3–2.7 h after the synoptic hour — marginally
+*ahead* of the forecast centre's nominal issuance stamp.** Its own
+ingest lag is effectively zero.
 
-| Storm | Issuer | Advisory | Synoptic hour | `sourceUpdatedAt` | Lag |
+Measured over four consecutive advisories of Dolphin `WP122026` (JTWC),
+2026-08-03/04, comparing each advisory's synoptic hour (the `valid_time`
+of track position 0) against both PDC timestamps:
+
+| Advisory | Synoptic | `sourceUpdatedAt` | nominal | `hazard.updatedAt` | **actual** |
 |---|---|---|---|---|---|
-| Dolphin `WP122026` | JTWC | 31 | 12:00Z | 15:00Z | **+3.00 h** |
-| Dolphin `WP122026` | JTWC | 32 | 18:00Z | 21:00Z | **+3.00 h** |
-| Genevieve `EP072026` | NHC | 39 | 21:00Z | 20:33Z | −0.45 h |
+| 31 | 12:00Z | 15:00Z | +3.00 h | 15:06Z | +3.10 h |
+| 32 | 18:00Z | 21:00Z | +3.00 h | 20:17Z | **+2.28 h** |
+| 33 | 00:00Z | 03:00Z | +3.00 h | 02:22Z | **+2.37 h** |
+| 34 | 06:00Z | 09:00Z | +3.00 h | 08:40Z | **+2.67 h** |
 
-Exactly +3.00 h twice for JTWC. That is the standard JTWC offset between
-the synoptic hour and advisory issuance, so PDC is publishing *when the
-forecast centre publishes*, not three hours behind it.
+**Use `hazard.updatedAt`, not `sourceUpdatedAt`.** The latter is exactly
++3.00 h on every advisory — it is a *nominal* stamp reproducing JTWC's
+standard synoptic→issuance offset, not an observation of when anything
+happened. `hazard.updatedAt` is when PDC's record actually changed, and
+in three of four cases it precedes the nominal stamp by 20–43 min.
 
-`hazard.updatedAt` — the field this repo keys captured versions on —
-tracked `sourceUpdatedAt` to within 6 min (adv 31) and 44 min (adv 32).
-Note the two are not identical and can disagree in either direction;
-`sourceUpdatedAt` looks like the advisory's nominal issuance stamp while
-`hazard.updatedAt` is when PDC's record actually changed.
+(An earlier revision of this section reported "+3.00 h exactly" as the
+publish lag. That was reading the label rather than the event; a second
+advisory would not have caught it, four did.)
+
+**Trap: `eventTime` is not the advisory time.** It equals
+`hazard.startedAt` (storm formation), so differencing against it yields
+the storm's age, not a lag — 183 to 221 h in these samples. Use track
+position 0's `forecastDateUserPref`.
+
+### Cross-check against GDACS
+
+The same four advisories, matched to GDACS event `1001297` on advisory
+number, agree **exactly**:
+
+| Δ | adv 31 | adv 32 | adv 33 | adv 34 |
+|---|---|---|---|---|
+| valid time | 0.0 min | 0.0 min | 0.0 min | 0.0 min |
+| latitude / longitude | 0.0 / 0.0 | 0.0 / 0.0 | 0.0 / 0.0 | 0.0 / 0.0 |
+| max wind | 0.008 kt | 0.008 kt | 0.009 kt | 0.010 kt |
+| 34 kt / 64 kt NE radius | 0.0 / 0.0 | 0.0 / 0.0 | 0.0 / 0.0 | 0.0 / 0.0 |
+
+The ~0.01 kt wind delta is a float artifact — GDACS stores m/s and the
+comparison converts. Advisory numbers align 1:1, so PDC's
+`(atcfId, advisoryNum)` joins to GDACS with no fuzzy matching.
+
+**Polling cadence check.** Advisories are 6-hourly and publish ~2.5 h
+after synoptic; the 3-hourly poll catches each one roughly an hour
+later (00Z→03:40 poll, 06Z→09:40, 12Z→15:40, 18Z→21:40). Advisories
+31–34 were captured consecutively with no gaps. About half the daily
+polls capture nothing new, which is the intended over-sampling and
+costs nothing because versions dedupe on `(uuid, updatedAt)`.
+
+**The cost of starting late, concretely.** At the time of this check
+GDACS held **35** actual advisories for Dolphin; the PDC archive held
+**4**. Advisories 1–30 occurred before polling began and are gone from
+PDC permanently — GDACS has them, PDC never will.
 
 **Trap: `eventTime` is not the advisory time.** It equals
 `hazard.startedAt` (storm formation), so differencing against it yields
 the storm's age, not a lag — 183 to 221 h in these samples. Use track
 position 0's `forecastDateUserPref`, or `sourceUpdatedAt`.
 
-**Confidence.** Two JTWC advisories of one storm. The single NHC sample
-is a *post-tropical final* advisory and shows a negative lag, which is
-not trustworthy — final advisories are issued off-cycle. There is still
-**no reliable Atlantic/East-Pacific measurement**, which is the basin
-that matters for the alert pipeline.
+**Confidence.** Four consecutive JTWC advisories of one storm. The one
+NHC sample (Genevieve `EP072026` adv 39, synoptic 21:00Z,
+`sourceUpdatedAt` 20:33Z) is a *post-tropical final* advisory showing a
+negative lag and is not trustworthy — final advisories are issued
+off-cycle. There is still **no reliable Atlantic/East-Pacific
+measurement**, which is the basin that matters for the alert pipeline,
+and no reason yet to assume NHC-sourced records behave like JTWC ones.
 
 **Consequence for alerting.** The storm alert email fires on NHC
 advisory issuance. If PDC publishes at issuance, PDC data is available
