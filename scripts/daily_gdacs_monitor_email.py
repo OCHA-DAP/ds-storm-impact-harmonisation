@@ -37,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ocha_relay.listmonk import ListmonkClient  # noqa: E402
 
+from src.datasets import pdc as pdc_mod  # noqa: E402
 from src.datasets.gdacs import get_active_cyclones, get_impact_by_country  # noqa: E402
 from src.gdacs_monitor_email import (  # noqa: E402
     build_email_html,
@@ -46,7 +47,10 @@ from src.gdacs_monitor_email import (  # noqa: E402
 
 load_dotenv()
 
-TEST_LIST_ID = 25
+# Listmonk list 101 "Storm Alerts - Monitoring" — exactly three subscribers
+# (Zack Arno, Leonardo Milano, Tristan Downing), verified 2026-08-04. Single
+# opt-in, so "unconfirmed" subscribers still receive campaigns.
+MONITOR_LIST_ID = 101
 TEST_PREFIX = "[test] "  # Prefixed onto BOTH the campaign name and the
                          # subject. The name-prefix triggers OCHA Listmonk's
                          # test-variant template (Go side); the subject
@@ -123,6 +127,55 @@ def fetch_active_exposure() -> tuple[pd.DataFrame, pd.DataFrame]:
     return active, pd.DataFrame(rows)
 
 
+def fetch_pdc_for_storms(active: pd.DataFrame) -> dict:
+    """Match each active GDACS storm to a live PDC record, keyed by eventid.
+
+    Queried live rather than read from the 3-hourly capture archive: PDC
+    publishes at bulletin issuance, so the archive can be up to 3 h stale at
+    send time (docs/pdc_api.md, Update lag).
+
+    Best-effort throughout — any failure degrades to "no PDC panel for this
+    storm" rather than failing the email, because the GDACS content is the
+    part people depend on.
+    """
+    out: dict = {}
+    if active.empty:
+        return out
+    try:
+        records = pdc_mod.fetch_active_cyclones()
+    except Exception as exc:  # noqa: BLE001 - never break the email over PDC
+        print(f"  WARN PDC list fetch failed, continuing without: {exc}", flush=True)
+        return out
+
+    print(f"  PDC active cyclones: {len(records)}", flush=True)
+    for _, storm in active.iterrows():
+        rec = pdc_mod.match_gdacs_name(storm["name"], records)
+        if rec is None:
+            print(f"    {storm['name']}: no PDC match", flush=True)
+            continue
+        try:
+            detail = pdc_mod.fetch_detail(rec["uuid"])
+            meta = pdc_mod.parse_meta(detail)
+            exposure = pdc_mod.parse_exposure(detail)
+            bands = pdc_mod.parse_bands_by_country(detail)
+        except Exception as exc:  # noqa: BLE001
+            print(f"    {storm['name']}: PDC detail failed ({exc})", flush=True)
+            continue
+        if exposure.empty:
+            print(f"    {storm['name']}: matched PDC but no exposure computed",
+                  flush=True)
+            continue
+        out[storm["eventid"]] = {
+            "meta": meta, "exposure": exposure, "bands": bands
+        }
+        print(
+            f"    {storm['name']}: PDC adv {meta.get('advisory_num')} "
+            f"({meta.get('atcf_id')}), {len(exposure)} country row(s)",
+            flush=True,
+        )
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -148,8 +201,8 @@ def main():
     parser.add_argument(
         "--list-id",
         type=int,
-        default=TEST_LIST_ID,
-        help=f"Listmonk list ID to target (default: {TEST_LIST_ID}).",
+        default=MONITOR_LIST_ID,
+        help=f"Listmonk list ID to target (default: {MONITOR_LIST_ID}).",
     )
     parser.add_argument(
         "--auto-send",
@@ -173,7 +226,7 @@ def main():
         print("Step 2: no active storms — stub email.", flush=True)
         html = build_stub_html(now)
         subject = (
-            f"{TEST_PREFIX}GDACS Monitor {now:%Y-%m-%d %H%M}Z:"
+            f"{TEST_PREFIX}GDACS & PDC Monitor {now:%Y-%m-%d %H%M}Z:"
             " no active storms"
         )
     else:
@@ -185,11 +238,16 @@ def main():
             f" {historical['iso3'].nunique()} iso3",
             flush=True,
         )
-        print("Step 3: render email HTML with inline strip plots...", flush=True)
-        html = build_email_html(active, exposure, historical, now)
+        print("Step 3: match PDC to active storms...", flush=True)
+        pdc_by_event = fetch_pdc_for_storms(active)
+
+        print("Step 4: render email HTML with inline strip plots...", flush=True)
+        html = build_email_html(
+            active, exposure, historical, now, pdc_by_event=pdc_by_event
+        )
         names = ", ".join(active["name"].tolist())
         subject = (
-            f"{TEST_PREFIX}GDACS Monitor {now:%Y-%m-%d %H%M}Z: {names}"
+            f"{TEST_PREFIX}GDACS & PDC Monitor {now:%Y-%m-%d %H%M}Z: {names}"
         )
 
     if args.dry_run:

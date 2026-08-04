@@ -174,14 +174,51 @@ cmp.style.hide(axis="index")
 ```
 
 GDACS reports 30.6M exposed in China and 12.0M in Taiwan; PDC reports
-neither. The explanation is the integration window, not a missing
-country. GDACS's `getimpact` accumulates over the **entire event
-including the forecast leg**, and Dolphin's five-to-eight-day forecast
-carries it toward Taiwan and the East China Sea. PDC's exposure is
-computed against its current `impactGeometry` swath. The two are
-answering different questions — "who could be affected before this
-storm is over" versus "who is inside the swath now" — and the numbers
-should not be reconciled without saying which is wanted.
+neither. It is tempting to explain this as a difference in how far
+ahead each source integrates, but that is wrong: **the two forecast
+tracks are identical, position for position, out to +120 h**, including
+the legs that carry the storm into the East China Sea. Neither source
+is looking further ahead than the other.
+
+The difference is the *footprint drawn around* that shared track, and
+the threshold that defines it.
+
+| Forecast leg | 34 kt swath reaches west to | 64 kt swath reaches west to |
+|---|---|---|
+| +96 h (125.8°E) | **121.0°E** | 124.3°E |
+| +120 h (124.1°E) | **119.6°E** | 122.6°E |
+
+Taiwan spans roughly 120–122°E and the Chinese coast 118–122°E. So the
+**34 kt swath reaches both; the 64 kt swath reaches neither.** PDC's
+`impactGeometry` — the polygon its exposure is computed on — has a
+western edge at **122.8°E**, sitting on the 64 kt envelope rather than
+the 34 kt one.
+
+That is exactly what a damage model should do. **GDACS's 34 kt is a
+wind criterion; PDC's is a damage criterion.** 34 kt is
+tropical-storm force, about 63 km/h, which causes essentially no
+structural damage — PDC's *lowest* band is "Minor Damage; power out".
+A damage footprint is therefore necessarily tighter than a 34 kt wind
+swath, and the gap is widest exactly where the storm is weakest and
+furthest out.
+
+PDC is not unaware of the risk further west: its `alertGeometry`
+reaches 115.1°E, well into mainland China. It simply declines to
+attribute *exposure* there, separating "area to be alert about" from
+"area where damage is modelled" and computing population only on the
+second. The same mechanism explains the 109 people PDC reports for
+China on advisory 32 — that is the footprint edge clipping the coast,
+not an error.
+
+The practical consequence is a caution about reading the GDACS figure.
+"109,834,366 exposed in China" does not mean 109.8M people are about to
+be harmed; it means *if a four-day-out forecast verifies, 109.8M people
+may experience ≥34 kt winds*. Two conditionals the number itself does
+not carry. When GDACS reports a nine-figure total and PDC reports
+approximately zero, **that divergence is itself the signal** — it marks
+a far-lead, low-threshold artifact rather than an imminent catastrophe,
+and a monitor showing only the GDACS number gives the reader no way to
+tell those apart.
 
 Marshall Islands appearing as `-1` in GDACS is the documented
 "not computed" sentinel, covered in chapter 09; it is not a zero.
