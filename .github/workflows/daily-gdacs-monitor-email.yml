@@ -13,9 +13,9 @@ on:
         type: boolean
         default: false
       list_id:
-        description: "Listmonk list ID to target (default: 25 test list)"
+        description: "Listmonk list ID override (blank = the script's default, list 101 Storm Alerts - Monitoring)"
         type: string
-        default: "25"
+        default: ""
 
 jobs:
   send:
