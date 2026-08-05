@@ -18,7 +18,7 @@ automatically-ingested cyclone and revises the recommendation.
 The technical reference remains `docs/pdc_api.md`. The snapshot behind
 this chapter is pinned by `scripts/cache_pdc_dolphin.py` into
 `book/_cache/11-pdc-2026-season/` (tracked in git), because PDC drops
-storms from its feed roughly 30 days after they end.
+storms from its feed as soon as they end.
 
 ```{python}
 #| label: setup
@@ -662,12 +662,45 @@ record, which is a different job from alert freshness. And PDC failures
 without PDC, and a missing API key then produced emails that were
 indistinguishable from PDC genuinely having no data for the storm.
 
+### The discovery window is narrower than we documented {#sec-pdc-retention}
+
+Chapter 08 estimated that `/hazards` returns active hazards *plus those
+that ended in roughly the last 30 days*, and concluded that daily polling
+therefore had a generous cushion. Re-measuring the live feed shows that
+cushion does not exist.
+
+The error was in the classification rather than the data. The original
+count treated every hazard with a real, non-sentinel `endedAt` as *ended*
+— but most of those timestamps are in the **future**, a projected end for
+a storm still running. Dolphin carried an `endedAt` of the next day while
+it was a Category 3. Across 949 live hazards, 27 carry the "still active"
+sentinel, 919 have an `endedAt` in the future, and just **three** are
+genuinely past their end — all three by less than a day.
+
+Chapter 08's own evidence pointed at this and was read the wrong way: the
+86-event flood cohort it noted had closed *within the last 24–48 hours*,
+which is a one-day window, not a thirty-day one.
+
+What replaces the old rule is less tidy than the rule it replaces. "Still
+open" is not sufficient either — Sinlaku carries the active sentinel and
+is nonetheless absent from the feed. Nor is it a staleness cutoff: a
+hazard last updated 105.9 days ago is still listed while Sinlaku drops out
+at 107. Some internal deactivation we cannot see governs membership, so
+the honest operating posture is not to predict what will still be there.
+
+None of this changes the recommendation, but it sharpens why the poller
+runs 3-hourly rather than daily. The earlier model implied a month-long
+grace period in which a missed storm could still be picked up. There is no
+grace period. A storm is discoverable only while PDC keeps it open, and
+the next section explains why missing that window is permanent.
+
 ### The archive is a key-value store with no key list
 
 One further finding, because it bears directly on the no-history
 problem. `GET /hazards/{uuid}` **keeps working long after a hazard
 leaves the rolling window** — Sinlaku and the Puerto Rico flood both
-still return full detail four months after dropping out of `/hazards`.
+still return full detail three and a half months after dropping out of
+`/hazards` (107 and 100 days respectively, checked 2026-08-05).
 So the perishable thing is not the payload; it is *discovery*.
 
 That does not open a back door to history, because there is no way to

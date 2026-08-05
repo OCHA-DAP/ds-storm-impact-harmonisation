@@ -1,9 +1,10 @@
 """Cache PDC + GDACS responses for chapter 08 (PDC evaluation).
 
 Pins the chapter's worked example to a fixed snapshot of the Sinlaku
-storm. PDC's rolling-window feed rotates events out within ~30 days of
-dissipation, and GDACS metadata can shift over time, so the chapter
-loads from cache instead of fetching live.
+storm. PDC's feed rotates events out essentially as soon as they end,
+and GDACS metadata can shift over time, so the chapter loads from cache
+instead of fetching live. (Sinlaku's *detail* is still fetchable by uuid
+months later — it is the list view that drops it.)
 
 Cached outputs land in book/_cache/08-pdc-evaluation/:
 - pdc_sinlaku.json           full PDC /hazards/{uuid} response

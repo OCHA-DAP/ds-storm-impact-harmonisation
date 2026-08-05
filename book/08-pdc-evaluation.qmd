@@ -121,8 +121,9 @@ def wind_color(ms):
 
 The cells below load the cached snapshots populated by
 `scripts/cache_pdc_sinlaku.py`. Re-run that script to refresh against
-live data (note that PDC's rolling-window feed will rotate Sinlaku out
-within roughly 30 days of dissipation).
+live data (note that PDC's feed rotates a storm out essentially as soon
+as it ends — Sinlaku is long gone from the list view, though its detail
+is still retrievable by uuid).
 
 ## Sinlaku in PDC vs GDACS
 
@@ -352,10 +353,11 @@ fig
 Three properties of the API would shape any pipeline built against it,
 independent of the Sinlaku-specific findings:
 
-1. **No archive.** `/hazards` returns currently-active hazards plus
-   those that ended within roughly the last 30 days. The `status`
-   query parameter is ignored, so there is no way to ask for older
-   events. A back-catalogue would have to be built locally by polling
+1. **No archive.** `/hazards` returns only the hazards PDC still
+   considers open. The `status` query parameter is ignored, so there is
+   no way to ask for older events. (This chapter originally estimated a
+   ~30-day post-end tail; re-measurement in @sec-pdc-retention shows there is
+   effectively none.) A back-catalogue would have to be built locally by polling
    daily and accumulating. That pattern matches the GDACS daily
    monitor (`src/gdacs_monitor_email.py`), not the GDACS historical
    exposure pipeline.
@@ -414,10 +416,8 @@ in flight.
    `endedAt` is set to a real timestamp, and the lifecycle for
    moving a hazard out of the active feed, are not documented.
 
-6. **Historical access.** `/hazards` returns a rolling window we
-   estimate at currently-active hazards plus those ended in roughly
-   the last 30 days, with no documented access path for older
-   records. For analytical work covering past cyclone seasons (CERF
+6. **Historical access.** `/hazards` returns only hazards PDC still
+   considers open, with no documented access path for older records. For analytical work covering past cyclone seasons (CERF
    coverage starts 2006) the rolling window is not sufficient.
 
 7. **Filter parameters and pagination.** The `?status=`,

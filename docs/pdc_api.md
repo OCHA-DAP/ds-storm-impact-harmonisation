@@ -115,7 +115,7 @@ disagree, **trust this section.**
 | PDF says | Live reality | Why it matters |
 |---|---|---|
 | `GET /types` | `GET /hazards/types` returns `[{id, name}, …]`; the `/types` path returns 500 `"No static resource types."` | Code generated from the PDF will 500 on first call |
-| `/hazards` returns active hazards only; no archive | Wrong on both counts. There is no archive endpoint, and `/hazards` returns currently-active hazards **plus** events that ended within roughly the last ~30 days. The `status` query parameter is silently ignored — `?status=ARCHIVED`, `?status=ACTIVE`, and `?status=BOGUSVALUE` all return roughly the same dataset. | What looks like an "archive" is just the default behaviour — see "What `/hazards` actually returns" below |
+| `/hazards` returns active hazards only; no archive | Wrong on both counts. There is no archive endpoint, and `/hazards` returns hazards PDC still considers open — see the corrected retention model below (the earlier "~30-day tail" claim was wrong). The `status` query parameter is silently ignored — `?status=ARCHIVED`, `?status=ACTIVE`, and `?status=BOGUSVALUE` all return roughly the same dataset. | What looks like an "archive" is just the default behaviour — see "What `/hazards` actually returns" below |
 | `name`/`description` use RFC 5646 (`en-US`) | Live `locale` is `en` (no region subtag) | Don't filter on `en-US` |
 | List-view `category = EVENT` | Live cyclone has `category = "RESPONSE"` | `category` is a status enum, not always `EVENT` |
 | (silent) | `endedAt = 32503679999` (= `2999-12-31T23:59:59 UTC`, a sentinel for "still active") | Use `< 32503679999` to detect "actually ended" |
@@ -130,7 +130,7 @@ disagree, **trust this section.**
 | `GET /actuator/info` | none | `{build: {artifact, name, time, version, group}}` | Confirmed v1.2.0, deploy 2026-04-21 |
 | `GET /actuator/health` | none | `{status: "UP"}` | |
 | `GET /hazards/types` | required | `[{id, name}, …]` (33 entries — full list below) | Authoritative source for `?types=` values |
-| `GET /hazards` | required | GeoJSON FeatureCollection of currently-active hazards plus those that ended within roughly the last ~30 days | `?types=CYCLONE` filter works (case-insensitive). `?status=` and date filters are silently ignored — see "What `/hazards` actually returns" below. |
+| `GET /hazards` | required | GeoJSON FeatureCollection of hazards PDC still considers open (no meaningful post-end tail — see corrected retention model) | `?types=CYCLONE` filter works (case-insensitive). `?status=` and date filters are silently ignored — see "What `/hazards` actually returns" below. |
 | `GET /hazards/{uuid}` | required | Detail object (see below) | Works for both active and archived hazards |
 
 **No pagination.** `/hazards?status=ARCHIVED` returns all 577 features in a
@@ -391,8 +391,9 @@ samples.** Revisit when a landfalled cyclone is in the feed.
 ### What `/hazards` actually returns
 
 There is no separate archive endpoint. The default `/hazards` call returns a
-single ~340 KB JSON document containing **all currently-active hazards plus
-those that ended within roughly the last ~30 days**. The `status` query
+single ~340 KB JSON document containing **the hazards PDC still considers
+open**. (An earlier version of this note claimed a ~30-day post-end tail; that
+was wrong — see the correction below.) The `status` query
 parameter is silently ignored:
 
 | Query | Feature count |
@@ -405,8 +406,10 @@ parameter is silently ignored:
 The 571↔577 drift is real events being added/removed between calls (a few
 minutes apart). All four queries return the same dataset.
 
-**Working retention model** — verified against the 577-feature snapshot
-probed 2026-04-27:
+**Working retention model** — ⚠️ **SUPERSEDED, AND WRONG.** Kept for the
+record because the mistake is instructive; the corrected model is in
+"Retention, re-measured" below. Originally inferred from the 577-feature
+snapshot probed 2026-04-27:
 
 ```
 visible in /hazards iff (endedAt is sentinel) OR (now - endedAt < ~30 days)
@@ -436,10 +439,53 @@ The exact window edges aren't documented and would need to be confirmed by
 re-polling weekly. But the model above explains the entire 577-feature
 distribution end-to-end.
 
-**Operational implication:** daily polling has a generous cushion. A
-landfalled cyclone typically dissipates within 1-3 weeks, so we'd see it in
-the feed for ~30 more days after it ends. Missing a few polling days won't
-cause data loss as long as we re-poll within the grace window.
+**Operational implication (CORRECTED 2026-08-05 — the original claim of a
+"generous cushion" was wrong):** there is no grace window. A hazard is
+discoverable only while PDC keeps it open; once dropped it cannot be found
+again, because there is no search and uuids are not derivable. Missed polls
+are unrecoverable. See "Retention, re-measured" below.
+
+#### Retention, re-measured (2026-08-05) — the ~30-day window does not exist
+
+The April model above ("visible iff sentinel OR ended <~30 days ago") is
+**wrong**, and the error was in the classification, not the data. It counted
+every hazard with a real (non-sentinel) `endedAt` as *ended*, when most of
+those timestamps are in the **future** — a projected end for a hazard still
+running. Dolphin carried an `endedAt` of the next day while at Category 3.
+April's own evidence pointed this way and was misread: the 86-event flood
+cohort had closed "within the last 24-48 hours", not 30 days.
+
+Re-measured on the full live feed, 949 hazards:
+
+| `endedAt` | count |
+|---|---:|
+| sentinel (2999-12-31) | 27 |
+| in the **future** — still running / projected end | 919 |
+| in the **past** — genuinely over | **3** (all ended 0.00 days ago) |
+| missing | 0 |
+
+Nothing survives in the list even a full day past its end.
+
+**But "not yet ended" is not the rule either.** Sinlaku still carries the
+sentinel `endedAt` and is nonetheless **absent** from the list. Nor is it a
+staleness cutoff: a live entry sits at `updatedAt` 105.9 days old while
+Sinlaku drops out at 107. Three candidate rules, all falsified. Some internal
+deactivation flag that is not exposed in the payload governs list membership,
+so **do not predict what will still be there — poll and capture.**
+
+**Detail outlives the list, by a lot.** Both documented uuids return HTTP 200
+long after they left the feed, and the controls confirm a 200 means something:
+
+| uuid | in list | detail | age |
+|---|---|---|---|
+| Sinlaku `e621323a…` (CYCLONE) | no | **200** | updated 107 d ago |
+| Flood, N. Puerto Rico `9175d060…` | no | **200** | ended 100 d ago |
+| Sinlaku *incident* `03726c63…` | no | 404 | (incident uuid, not a hazard) |
+| `00000000-0000-4000-8000-…` | no | 404 | control |
+
+So the archive is real but **unaddressable**: ~3.5 months of retention is
+demonstrated, with no upper bound established — and no way to obtain a uuid
+you did not capture while the hazard was open.
 
 **Type distribution (full 577-feature sample):**
 
@@ -460,7 +506,7 @@ cause data loss as long as we re-poll within the grace window.
 The single CYCLONE is Sinlaku — currently active, not archived. The
 distribution is heavily biased toward US-domain weather types
 (FLOOD/WILDFIRE/STORM/HIGHWIND/SEVEREWEATHER = 482 of 577 = 84%). Combined
-with the ~30-day post-end retention, **PDC supplies essentially zero
+with the near-zero post-end retention, **PDC supplies essentially zero
 historical cyclones** — the entire historical record must be built locally
 by daily polling.
 
@@ -476,7 +522,7 @@ polling means: pull the full list and dedupe locally by `(uuid, updatedAt)`.
 | Hazard | UUID | Useful for |
 |---|---|---|
 | Tropical Storm Sinlaku (manually-entered, post-event "Response Support" record) | `e621323a-1d6e-4b3c-9413-e72800dab5d4` | Live cyclone schema (RICHTER, `sourceName = "PDC Manual Hazard"`, `category = RESPONSE`, all-zero exposure despite the storm tracking over Guam and Mariana Islands per GDACS). Entered 2026-04-20 16:30 UTC; storm itself ended 2026-04-19 per JTWC. |
-| Flood, Northern Puerto Rico (recently-ended) | `9175d060-4f6b-49f9-9335-950dfbcb0caa` | Populated `totalByCountry` (PRI) — exposure-schema reference. May drop out of the feed once it's ~30 days past `endedAt`. |
+| Flood, Northern Puerto Rico (recently-ended) | `9175d060-4f6b-49f9-9335-950dfbcb0caa` | Populated `totalByCountry` (PRI) — exposure-schema reference. Long gone from the feed, but **still returns HTTP 200 by uuid at 100 days past `endedAt`** (checked 2026-08-05) — the key evidence that detail outlives list membership. |
 | Sinlaku incident UUID (inside detail) | `03726c63-a8b9-4403-b5f0-442b5f8487b5` | Cross-reference for `incident.uuid` semantics |
 
 ### Open questions still unresolved
@@ -490,13 +536,11 @@ polling means: pull the full list and dedupe locally by `(uuid, updatedAt)`.
    for both samples seen. Need a landfalled cyclone observation to confirm
    whether multiple bucket entries appear and what `level` values map to
    (wind thresholds? Saffir-Simpson?).
-3. **Confirm the ~30-day post-end retention window.** The working model
-   ("visible iff active OR ended <~30 days ago") explains the current
-   snapshot, but the exact window edges aren't documented. Re-poll weekly
-   for a month and watch which uuids drop off. Particularly worth checking:
-   do PDC's "long open-state" cohorts (year-long floods, multi-year
-   droughts) close on a fixed schedule (the 86 floods all closing on
-   2026-04-27/28 hint at this), or based on observed data?
+3. **RESOLVED (wrongly framed).** There is no ~30-day window — see
+   "Retention, re-measured" below. What remains genuinely open is *what*
+   drops a hazard from the list, since neither `endedAt` nor `updatedAt`
+   predicts it (Sinlaku holds the sentinel `endedAt` and is still absent).
+   Some internal deactivation flag we cannot see is doing the work.
 4. **Multi-country events.** All exposure samples we have happen to be
    single-country. The shape `totalByCountry: [{country, admin0, …}, …]`
    strongly suggests per-country rows for cross-border events, but not yet
@@ -506,12 +550,12 @@ polling means: pull the full list and dedupe locally by `(uuid, updatedAt)`.
 
 Replaces / supersedes the implications above this section.
 
-1. **Daily-poll-and-accumulate is the only viable design.** There is no
-   archive — `/hazards` returns currently-active hazards plus those that
-   ended in roughly the last ~30 days. The full historical record must be
-   built locally. Daily cadence has a generous cushion (a landfalled cyclone
-   stays visible for ~30 days after it dissipates), so the pipeline is
-   forgiving of missed polls within the grace window. Pattern matches the
+1. **Poll-and-accumulate is the only viable design, and it is unforgiving.**
+   There is no archive, and (corrected 2026-08-05) no post-end grace window
+   either — a hazard is visible only while PDC keeps it open. The full
+   historical record must be built locally, and a missed poll is permanent
+   data loss rather than a recoverable gap. This is why the poller runs
+   3-hourly rather than daily. Pattern matches the
    GDACS *daily monitor* in `src/gdacs_monitor_email.py` more than the
    GDACS *historical exposure* pipeline.
 2. **Schema target alignment is favourable.** PDC's

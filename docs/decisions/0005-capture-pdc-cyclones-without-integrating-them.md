@@ -45,7 +45,10 @@ do we do about the fact that its record is being destroyed continuously".
 ## Decision Drivers
 
 - PDC history is **perishable**: unpolled advisories are permanently
-  unrecoverable, and the rolling window drops storms ~30 days after they end.
+  unrecoverable, and the feed drops storms essentially as soon as they end.
+  (Corrected 2026-08-05: this driver originally said "~30 days after they
+  end" — the real window is far tighter, which strengthens rather than
+  changes the decision. See `docs/pdc_api.md`.)
 - The historical harmonisation this book supports needs coverage back to CERF's
   2006 baseline, which PDC can never provide.
 - Integration into a production pipeline is a durable commitment; the cyclone

@@ -1,11 +1,12 @@
 """Poll the PDC Hazards API for cyclones and archive the raw responses.
 
-PDC has no archive endpoint. `/hazards` returns currently-active hazards plus
-those that ended within roughly the last ~30 days, and the `?status=`,
+PDC has no archive endpoint. `/hazards` returns only the hazards PDC still
+considers open — with no post-end grace period — and the `?status=`,
 `?startedAfter` and `?updatedAfter` filters are silently ignored (see
 `docs/pdc_api.md`). The only way to build a historical PDC record is to poll
 and accumulate. Every polling cycle we miss is storm history that cannot be
-recovered later.
+recovered later: a uuid we never captured is unobtainable, because there is
+no search and uuids are random.
 
 A cyclone detail object is **forecast-only**: it carries the current
 advisory's positions from now forward, and no past track. Typhoon Dolphin at
