@@ -708,7 +708,6 @@ dependencies = [
     { name = "ocha-stratus" },
     { name = "openpyxl" },
     { name = "pandas" },
-    { name = "plotnine" },
     { name = "pycountry" },
     { name = "python-dotenv" },
     { name = "requests" },
@@ -737,7 +736,6 @@ requires-dist = [
     { name = "ocha-stratus", specifier = ">=0.1.7" },
     { name = "openpyxl", specifier = ">=3.1.5" },
     { name = "pandas", specifier = ">=3.0.1" },
-    { name = "plotnine", specifier = ">=0.15.3" },
     { name = "pycountry", specifier = ">=26.2.16" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "requests", specifier = ">=2.32" },
@@ -1936,21 +1934,6 @@ wheels = [
 ]
 
 [[package]]
-name = "mizani"
-version = "0.14.4"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "numpy" },
-    { name = "pandas" },
-    { name = "scipy" },
-    { name = "tzdata", marker = "sys_platform == 'emscripten' or sys_platform == 'win32'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/a7/02/43fcf763c70e8aa8edc28ac65713daca2c18d3bc2b998af4647966b5bafb/mizani-0.14.4.tar.gz", hash = "sha256:28934d91516d922d7cb0382c82a6c513692abc0174c42a50294ae571520633f9", size = 772490, upload-time = "2026-01-28T14:42:18.108Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/bd/30/b6617c74a8234ff60265373ef730eb6378ccdda74042f51f9ac936191664/mizani-0.14.4-py3-none-any.whl", hash = "sha256:ed72bf249e2a18b5dcc65cd54c7eaa5444b2cb09c7e18aafa2ab6f05f1b78620", size = 133471, upload-time = "2026-01-28T14:42:16.328Z" },
-]
-
-[[package]]
 name = "msgspec"
 version = "0.21.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2501,23 +2484,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/3a/7f/0f100df1172aadf88a929a9dbb902656b0880ba4b960fe5224867159d8f4/plotly-6.7.0.tar.gz", hash = "sha256:45eea0ff27e2a23ccd62776f77eb43aa1ca03df4192b76036e380bb479b892c6", size = 6911286, upload-time = "2026-04-09T20:36:45.738Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/90/ad/cba91b3bcf04073e4d1655a5c1710ef3f457f56f7d1b79dcc3d72f4dd912/plotly-6.7.0-py3-none-any.whl", hash = "sha256:ac8aca1c25c663a59b5b9140a549264a5badde2e057d79b8c772ae2920e32ff0", size = 9898444, upload-time = "2026-04-09T20:36:39.812Z" },
-]
-
-[[package]]
-name = "plotnine"
-version = "0.15.3"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "matplotlib" },
-    { name = "mizani" },
-    { name = "numpy" },
-    { name = "pandas" },
-    { name = "scipy" },
-    { name = "statsmodels" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/63/d5/4eeed62b101aa879b87e9bbc9d0650700b5ebd1ffa743902286b039135a2/plotnine-0.15.3.tar.gz", hash = "sha256:2e8130db4673e0daccb1fd1dfc9f2a6cd2e7843b14f861f4ab861dde1639045f", size = 6788365, upload-time = "2026-01-28T16:35:34.708Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/d8/79/eb59d10e13b151a514a8af3b1dcefb5e998b6c8c26bf0cf82d2b98f02c23/plotnine-0.15.3-py3-none-any.whl", hash = "sha256:39fd2ab8b6465275c8a283ce20d4b743dd865e94c74ae7d7d6f21a7eb31f62c1", size = 1332831, upload-time = "2026-01-28T16:35:32.241Z" },
 ]
 
 [[package]]

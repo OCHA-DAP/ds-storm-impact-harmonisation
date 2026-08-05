@@ -1,7 +1,7 @@
 """Rendering helpers for the daily GDACS monitor email.
 
-Produces per-country strip-chart PNGs (plotnine) and assembles an HTML
-email body that embeds them as base64 data URIs so the email is
+Produces one ridgeline PNG per affected country (matplotlib) and assembles
+an HTML email body that embeds them as base64 data URIs so the email is
 self-contained.
 
 Historical baseline: OCHA in-house IBTrACS-based exposure parquet
@@ -68,7 +68,6 @@ SEQ_3 = "#0a2756"      # --hdx-primary-8  widespread
 # are unreliable in mail clients, so the stacks degrade rather than vanish.
 SANS = ("Roboto,-apple-system,BlinkMacSystemFont,'Segoe UI',"
         "Helvetica,Arial,sans-serif")
-DISPLAY = "Merriweather,Georgia,'Times New Roman',serif"
 MONO = "ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"
 
 # Light -> dark = minor -> widespread, monotonic in lightness by construction.
