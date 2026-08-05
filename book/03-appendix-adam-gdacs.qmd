@@ -9,7 +9,8 @@ were considered alongside the OCHA in-house exposure product; this chapter
 focuses on the question "can we use them to drive RR allocation modelling
 given CERF's 2006 to 2023 temporal coverage?" Because of the limited overlap,
 the answer was no, and the main analysis uses the OCHA exposure dataset
-instead (see @sec-sid-matching).
+instead (see [Data & Merge](01-data-merge.qmd), which covers the storm ID
+matching that links CERF allocations to exposure).
 
 A broader methodology-level comparison of OCHA vs GDACS, independent of
 CERF modelling constraints, is in

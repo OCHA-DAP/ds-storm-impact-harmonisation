@@ -39,10 +39,12 @@ jobs:
           DSCI_LISTMONK_BASE_URL: ${{ secrets.DSCI_LISTMONK_BASE_URL }}
           DSCI_LISTMONK_API_USERNAME: ${{ secrets.DSCI_LISTMONK_API_USERNAME }}
           DSCI_LISTMONK_API_KEY: ${{ secrets.DSCI_LISTMONK_API_KEY }}
-          # Without this the PDC panels silently vanish: the pipeline is
-          # deliberately fault-tolerant about PDC, so a missing key degrades to
-          # "no PDC panel" rather than failing the run, which reads exactly
-          # like PDC having no data for the storm.
+          # Required. A missing key now FAILS the run rather than degrading:
+          # an earlier version continued without PDC, which rendered emails
+          # indistinguishable from PDC genuinely having no data for the storm,
+          # and that shipped for several sends before anyone noticed. Opt into
+          # degradation explicitly with --allow-missing-pdc. See
+          # docs/monitor_email.md.
           PDC_API_KEY: ${{ secrets.PDC_API_KEY }}
         run: |
           ARGS=""

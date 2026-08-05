@@ -26,6 +26,15 @@ Behind the three-source comparison (chapters 09–10) and the AAC deck.
 | **GDACS / ADAM footprint method** | Why GDACS reads systematically higher than CHD: max-radius circle vs quadrant polygon, **with citable sources** | [`gdacs_adam_wind_footprint.md`](gdacs_adam_wind_footprint.md) |
 | **PDC Hazards API** | Candidate third exposure source. Evaluated ch. 08, re-evaluated on the 2026 season ch. 11; captured 3-hourly but not integrated (ADR 0005) | [`pdc_api.md`](pdc_api.md) |
 
+## What this repo operates
+
+One outbound pipeline, documented here because it is ours rather than an
+external source.
+
+| What | Notes | Doc |
+|---|---|---|
+| **GDACS & PDC monitor email** | 4×/day to Listmonk list 101. Two silent-failure traps in the GDACS query, PDC queried live rather than from the archive, and the `[test]` prefix is deliberate | [`monitor_email.md`](monitor_email.md) |
+
 ## Data flow into the predictor
 
 ```mermaid
