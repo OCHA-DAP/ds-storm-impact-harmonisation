@@ -67,8 +67,8 @@ jobs:
         if: steps.refresh.outputs.refresh == 'true'
         with:
           # Must satisfy the root pyproject.toml's requires-python (>=3.12.4).
-          # This only runs export_app_data.py in CI; the deployed app's runtime
-          # Python is pinned separately in app/pyproject.toml.
+          # This only runs export_app_data.py in CI; the compare app itself is
+          # static JS and has no Python runtime.
           python-version: "3.12"
 
       - name: Install dependencies
