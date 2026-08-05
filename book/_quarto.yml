@@ -13,12 +13,6 @@ book:
     logo: logo_white.png
   chapters:
     - index.qmd
-    - part: "CERF Predictions"
-      chapters:
-        - 02b-analysis-cerf-api.qmd
-        - 02c-analysis-inform.qmd
-        - 02d-analysis-conflict.qmd
-        - 02e-country-differentiation.qmd
     - part: "Monitoring Pipeline Exploration"
       chapters:
         - 03-gdacs-realtime.qmd
