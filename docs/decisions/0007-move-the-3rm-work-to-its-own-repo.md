@@ -98,20 +98,21 @@ predictor's files were removed from inside it.
   would have left the chapters rendering off blobs nobody could regenerate.
   `refresh_acled_monthly.py` moved for the same reason even though it has no
   consumer in either book — the deployed app reads its output.
-* Bad, because `book/index.qmd` still frames the whole book around the 3RM
-  (Phase 1 / Phase 2), and the subtitle "Linking CERF allocations with cyclone
-  population exposure" no longer describes what remains. Rewriting the landing
-  page is an editorial decision and is deliberately left as follow-up rather
-  than bundled into a mechanical removal.
+* Good, because `book/index.qmd` and the book subtitle were refocused on what
+  remains, in a separate commit on this branch. The landing page had been framed
+  entirely as Phase 1 (`02b`) / Phase 2 (`02c`), and the subtitle "Linking CERF
+  allocations with cyclone population exposure" no longer described the book. It
+  now carries a pointer to the new repo, since that is what many readers will
+  arrive looking for.
+* Good, because `plotnine` was declared in the same pass. It had been imported
+  by six chapters and declared nowhere, rendering only from `_freeze`; four of
+  the six left with the 3RM, but `01-data-merge.qmd` and `02-analysis.qmd` still
+  import it and would have failed on the next edit.
 * Bad, because `02-analysis.qmd` is now the only remaining CERF-allocation
   analysis and it is not listed in `book/_quarto.yml` — it is an orphan file
-  that is never rendered. Pre-existing, surfaced by this work, not resolved by
-  it.
-* Neutral, because `plotnine` remains undeclared in `pyproject.toml` while
-  `01-data-merge.qmd` and `02-analysis.qmd` still import it. Four of the six
-  affected chapters left, which shrinks the problem without fixing it. Those
-  two render only from their `_freeze` caches; editing either forces
-  re-execution and fails on `ModuleNotFoundError`.
+  that is never rendered, yet it is the reason `src/datasets/cerf.py` must keep
+  `load_3rm_cirv`. Pre-existing, surfaced by this work, not resolved by it:
+  deciding whether to wire it into the book or delete it is a separate call.
 
 ### Confirmation
 
