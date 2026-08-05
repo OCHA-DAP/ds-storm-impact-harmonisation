@@ -597,11 +597,34 @@ be backfilled even for a storm currently in the feed — it can only be
 accumulated forward by polling, which is why
 `scripts/poll_pdc_cyclones.py` runs 3-hourly.
 
-Detail lookups do outlive the list, though: `GET /hazards/{uuid}` still
-returned Sinlaku and the Puerto Rico flood on 2026-08-03, over three
-months after both dropped out of `/hazards`. So the perishable thing is
-**discovery** (uuids), not the payload. Do not rely on this as a
-retention guarantee.
+Detail lookups do outlive the list: `GET /hazards/{uuid}` still returned
+Sinlaku and the Puerto Rico flood on 2026-08-05, four months after both
+dropped out of `/hazards`. So the perishable thing is **discovery**, not
+the payload. Do not rely on this as a retention guarantee.
+
+**But discovery is a hard dead end, not a gap to be worked around**
+(checked 2026-08-05):
+
+- Hazard identifiers are **UUID v4** — random, unordered, 2^122. Not
+  enumerable, and not derivable from an ATCF ID, storm name or date.
+- The OpenAPI spec lists **six paths total**: `/hazards`,
+  `/hazards/{uuid}`, `/hazards/types`, `/actuator`, `/actuator/health`,
+  `/actuator/info`. No search, no query-by-identifier, no archive.
+- The list *appears* to reach back to 2024 (a Haiti civil-unrest hazard
+  from 2024-03-19, a Western US drought from 2024-04-11) but those are
+  long-running hazards that never closed. It is not an archive.
+
+So a 2024/2025 storm is retrievable **in principle** and unreachable
+**in practice** unless its uuid was recorded at the time. Consequences:
+
+1. The archive begins the day polling begins. No backfill is possible
+   from the API, by any route.
+2. A uuid is worth more than it looks. Capturing the list view is what
+   buys future access to the detail — which is why the poller writes
+   `polls/<ts>/_list.json` on every run, including empty ones.
+3. A uuid salvaged from any other system that touched PDC (an app URL,
+   another repo's captures, a saved response) is a genuine recovery of
+   an otherwise unreachable record.
 
 ### Exposure for a live cyclone
 

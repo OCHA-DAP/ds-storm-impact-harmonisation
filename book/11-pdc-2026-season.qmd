@@ -616,11 +616,77 @@ Concretely, the position this chapter supports:
   permanent, and it is small.
 - **Do not integrate into the historical pipeline.** Nothing here
   changes the 2006-baseline problem.
-- **Re-assess for real-time alerting after a landfall.** Dolphin had not
-  made landfall at capture time (`landfallAdmin0` was null), so the
-  fields PDC reserves for landfall — `hoursLandfall`,
-  `categoryLandfall`, `landfallTime` — are still unobserved, and the
-  band-to-wind-threshold mapping is still unknown.
+- **Integrated into the daily GDACS monitor email**, which is where that
+  re-assessment landed. See [What happened next](#what-happened-next).
+
+## What happened next
+
+Written a day after the rest of this chapter, because two things changed
+quickly enough to make the recommendation above out of date.
+
+**The landfall fields populated.** They were null on every capture until
+Typhoon Dolphin's advisory 35, when they filled in with Japan, 72 hours
+out, Category 3. That was the condition this chapter set for
+re-assessing PDC for alerting, and it arrived within two days. The
+fields are exactly as useful as hoped: the monitor previously said
+nothing about when or where a storm comes ashore, and that line is what
+turns an exposure count into a deadline.
+
+**PDC now ships in the monitor email.** The per-country strip plots were
+replaced by a ridgeline panel — a density ridge per wind threshold
+showing that country's storm history, a dot for the current storm, and
+PDC as a stacked damage-class bar anchored to its total on the shared
+population axis. PDC is deliberately not a dot on a ridge, for the
+reason established above: its classes are a damage ratio, so a dot would
+assert a wind mapping that does not exist.
+
+The framing that made PDC composable with an email built on history is
+simple. GDACS answers *how many* and, with 25 years behind it, *how
+unusual*. PDC answers *how bad* — and that question needs no history at
+all, so PDC could join immediately and will simply gain its own return
+period once a season has accumulated.
+
+The clearest thing the panel does is make the China divergence legible
+without prose. GDACS reports 149M exposed there; PDC reports 94,900, of
+which 99% is its *minor* class. On the panel that is a 34 kt dot far out
+in the right tail, "not reached" at 64 kt, and a PDC bar three decades
+to the left. A monitor showing only the 149M gives a reader no way to
+see that.
+
+Two implementation notes worth carrying forward. The email queries PDC
+**live** rather than reading the capture archive, because PDC publishes
+at bulletin issuance while the poller runs 3-hourly, so the archive can
+be three hours stale at send time; the archive's job is the historical
+record, which is a different job from alert freshness. And PDC failures
+**fail the run** rather than degrading: an earlier version continued
+without PDC, and a missing API key then produced emails that were
+indistinguishable from PDC genuinely having no data for the storm.
+
+### The archive is a key-value store with no key list
+
+One further finding, because it bears directly on the no-history
+problem. `GET /hazards/{uuid}` **keeps working long after a hazard
+leaves the rolling window** — Sinlaku and the Puerto Rico flood both
+still return full detail four months after dropping out of `/hazards`.
+So the perishable thing is not the payload; it is *discovery*.
+
+That does not open a back door to history, because there is no way to
+obtain keys for anything not currently in the window:
+
+- Hazard identifiers are **UUID v4** — random, unordered, a 2^122 space.
+  They cannot be enumerated, and they cannot be derived from a storm's
+  ATCF ID or name.
+- The API surface is six paths (`/hazards`, `/hazards/{uuid}`,
+  `/hazards/types`, and three `/actuator` endpoints). There is **no
+  search, no query-by-identifier, and no archive endpoint**.
+
+So a 2024 or 2025 storm is retrievable in principle and unreachable in
+practice, unless its UUID was recorded at the time by someone. The
+practical consequence is unchanged and worth restating plainly: the
+archive begins the day polling begins, and every advisory before that is
+gone. It also means a UUID is worth more than it looks — capturing the
+list view is what buys future access to the detail, and a UUID salvaged
+from any other system that touched PDC is a genuine recovery.
 
 The remaining open questions from chapter 08 that this chapter does not
 settle are the exposure-compute trigger in full, the `RESPONSE` category
