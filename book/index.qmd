@@ -5,125 +5,126 @@ title: "Introduction"
 ::: {.callout-tip appearance="simple"}
 ## Executive Summary
 
-The INFORM Risk and INFORM Severity indices are viable replacements for
-CIRV in the 3RM regression model. INFORM Risk alone matches CIRV's
-performance (Adj R^2^ = 0.709 vs 0.707) with full temporal coverage and the
-advantage of being a transparent, publicly available index. Using both
-Risk and Severity together yields the best fit (Adj R^2^ = 0.729), though
-Severity is limited to 2019+. These findings hold across all emergency
-types (n = 422 allocations).
+There is no single authoritative figure for how many people a cyclone
+exposed. CHD, GDACS and WFP ADAM each produce national population exposure
+estimates, and they disagree — not marginally, but on both magnitude and on
+*who* was exposed at all.
 
-On cyclone exposure specifically: population exposed to hurricane-force
-winds (64+ kt) shows a significant bivariate relationship with CERF
-allocation amounts from 2016 onward (Spearman rho = 0.70; R^2^ up to
-0.43 on the log scale after outlier removal). However, even at its
-strongest, exposure explains under half the variance in allocations,
-limiting its standalone operational utility. Adding exposure to the
-3RM modestly improves Adj R^2^ for TC allocations: from 0.554 to 0.647
-without people targeted, and from 0.813 to 0.879 with people targeted
-(both at 64 kt). Exposure coefficients do not reach significance at
-these sample sizes (n = 29--40).
+ADAM is close to a duplicate of GDACS (log-correlation 0.94), so the three
+sources are effectively two. Where CHD and GDACS both find people, CHD reads
+about half of GDACS (median ratio ≈ 0.5), and the two agree on which
+country–storm units are exposed at roughly chance level (κ ≈ 0). The
+comparable record is also thin: GDACS yields a usable per-country exposure for
+only ~60 storms, owing to gaps in its 2016–2022 data.
+
+Taking the per-cell maximum of the three — the "one number from three"
+approach — roughly triples the CHD figure (~3.2×). That number is
+substantially an ADAM/GDACS one: weighted by people, ADAM supplies 68% of the
+country-level MAX and 54% subnationally, while CHD contributes 4–10%.
 :::
 
 ::: {.callout-note appearance="simple"}
 ## Technical Summary
 
-**Phase 1 (TC exposure):** Population exposed to hurricane-force winds
-(64+ kt) shows the strongest bivariate association with CERF allocation
-size (Spearman rho = 0.70, R^2^ = 0.43 on log scale after outlier
-removal, 2016+). Variance explained remains modest, limiting standalone
-operational utility. Adding exposure to the 3RM modestly increases
-Adj R^2^ for storm allocations at 64 kt (0.554 to 0.647 without people
-targeted; 0.813 to 0.879 with), but exposure coefficients do not reach
-significance at small n (29--40). Early exploration of
-[GDACS and ADAM exposure datasets](#sec-gdacs-completeness) revealed
-significant temporal gaps that precluded their use; all TC analysis
-relies on the OCHA in-house exposure estimates.
+**Source comparison.** ADAM's redundancy with GDACS reduces a
+three-source problem to two. Within the comparable subset, disagreement is
+both in magnitude (median CHD/GDACS ≈ 0.5 on both-positive units) and in
+classification (κ ≈ 0 on whether a unit is exposed). Early exploration of the
+GDACS and ADAM historical exports revealed substantial temporal gaps
+(see @sec-gdacs-completeness) — GDACS rows exist for 2016–2021 but carry null
+exposure values, and ADAM begins only in 2023.
 
-**Phase 2 (INFORM update):** Replacing CIRV with INFORM Risk produces
-nearly identical fit on the full 3RM dataset (Adj R^2^ = 0.709 vs 0.707,
-n = 422). On the subset with INFORM Severity coverage (n = 237, 2019+),
-both indices individually outperform CIRV (Adj R^2^ = 0.724 vs 0.717),
-and using both together yields the best specification (Adj R^2^ = 0.729).
-Decomposing either index into individual pillars does not improve on
-the composite scores.
+**MAX aggregation.** The per-cell maximum is usually close to its runner-up
+(median ≈ 1.08×), so it behaves less like an outlier-picker than expected;
+about 1 cell in 8 disagrees by ≥2×. Subnationally the MAX surface stitches all
+three methodologies together — across the admin units of a single storm, CHD,
+GDACS and ADAM each win somewhere.
+
+**Monitoring pipeline.** GDACS exposure can be retrieved in real time rather
+than from historical exports, with per-issuance ("episode") resources
+distinguishing current storm state from cumulative impact and from forecast
+evolution. GDACS events match to the NHC A-deck via `atcf_id` by comparing
+forecast `valid_time` coordinates — the TCM advisory updates only the
+observational position, leaving forecast steps identical. NHC wind-speed
+probability polygons are basin-wide rather than per-storm, tiled as
+non-overlapping concentric rings; spatial attribution resolves ~76% of
+ambiguous timestamps. The PDC Hazards API was evaluated as a candidate third
+source and is captured continuously but not integrated (ADR 0005).
 :::
 
 ## Background
 
-The Central Emergency Response Fund (CERF) is the UN's global humanitarian
-fund, managed by OCHA. Through its rapid-response window, CERF provides
-funding within days of a new emergency to ensure affected people receive
-relief assistance early. Allocation amounts are informed by several factors
-including the scale and severity of needs, total funding required, the
-country's pre-existing humanitarian situation, and the number of people
-targeted.
+This book documents work by OCHA's Centre for Humanitarian Data (CHD) Data
+Science team on two related streams. First, a pipeline estimating national
+population exposure to tropical cyclone wind speeds, using IBTrACS storm
+tracks combined with wind field models. Second, an effort to reconcile
+exposure estimates from multiple providers — GDACS, WFP ADAM, PDC and the
+in-house CHD model — into something a humanitarian decision-maker can act on.
 
-[Rost (2025)](https://zenodo.org/records/15164535) formalised this process
-with a simple regression model (3RM) that uses four explanatory variables
---- emergency type, the CERF Index for Risk and Vulnerability
-([CIRV](https://doi.org/10.1186/s41018-025-00184-x)), total funding
-required (log), and number of people targeted (log) --- to explain CERF
-allocation amounts. The model achieves an adjusted R^2^ of 0.71 across
-378 rapid-response allocations (2016--2024), confirming that CERF
-allocations are broadly consistent with these factors. CIRV is a
-CERF-internal composite index built from INFORM Risk, INFORM Severity,
-and a multi-indicator component. This analysis examines two questions:
-whether adding hazard-specific information (cyclone population exposure)
-can improve the 3RM for storm events, and whether the publicly available
-INFORM indices can replace CIRV directly.
-
-This analysis builds on two parallel streams of work within OCHA's Centre for Humanitarian Data (CHD) Data Science team. First, a pipeline to estimate national
-population exposure to tropical cyclone wind speeds using IBTrACS storm
-tracks combined with wind field models. Second, an effort to consolidate
-exposure estimates from multiple sources (GDACS, WFP ADAM, and the
-in-house CHD model) into a harmonised multi-ensemble product. Early
-exploration of the GDACS and ADAM datasets revealed significant temporal
-gaps that limited their usefulness (see @sec-gdacs-completeness);
-the OCHA exposure dataset, covering 2001--2026 with over 1,200 storms,
-proved far more suitable for this analysis.
+The motivating problem is practical. Operational users want *one* number for
+"people exposed", and cross-agency monitoring requires that different
+organisations reporting on the same storm not contradict each other. But the
+providers use different wind footprint geometries, different population
+rasters and different reporting thresholds, so their estimates are not
+interchangeable. Understanding the size and structure of that disagreement is
+a precondition for standardising on any single figure.
 
 ## Research Questions
 
-This analysis addresses two questions in sequence:
+**Source comparison.** How far do CHD, GDACS and ADAM disagree on national
+cyclone population exposure — in magnitude, and in which units they report as
+exposed at all? Is the historical record complete enough to compare them?
 
-**Phase 1 -- TC Windspeed Exposure:** Can national population exposure
-estimates from cyclone wind field models predict CERF allocation amounts
-for tropical cyclone events? Does adding exposure to the 3RM improve its
-fit for storms?
+**Aggregation.** If a single number is required, what does taking the maximum
+across sources actually produce, and which source ends up supplying it?
 
-**Phase 2 -- INFORM Update:** Can the publicly available INFORM Risk and
-INFORM Severity indices replace CIRV in the 3RM, maintaining or improving
-model performance with a more transparent, reproducible specification?
+**Monitoring.** Can these sources be retrieved in real time, matched to a
+common storm identity, and combined into a monitoring pipeline?
 
 ## Data Sources
 
 | Dataset | Blob Path | Description |
 |---|---|---|
-| CERF storms | `ds-storm-impact-harmonisation/processed/cerf-storms-with-sids-2024-02-27.csv` | CERF-funded storm events with IBTrACS storm IDs |
 | OCHA exposure | `ds-storm-impact-harmonisation/processed/adm0_ibtracs_exp_all.parquet` | OCHA national pop. exposure (34/50/64 kt), 2001--2026 |
 | ADAM exposure | `ds-cyclone-exposure/adam_historical_national_exposure.csv` | WFP ADAM national pop. exposure (60/90/120 km/h) |
 | GDACS exposure | `ds-cyclone-exposure/gdacs_historical_national_exposure.csv` | GDACS national pop. exposure (34 kt / 64 kt) |
+| CERF storms | `ds-storm-impact-harmonisation/processed/cerf-storms-with-sids-2024-02-27.csv` | CERF-funded storm events with IBTrACS storm IDs (appendices only) |
+
+Live sources (GDACS API, NHC GIS archive, PDC Hazards API) and the exposure
+database are documented in [`docs/`](https://github.com/OCHA-DAP/ds-storm-impact-harmonisation/tree/main/docs).
 
 ## Book Structure
 
-- **TC Windspeed & 3RM Replication** (Phase 1) --- Bivariate analysis of
-  cyclone exposure vs CERF allocations, prediction of 3RM outcome
-  variables, and testing whether exposure improves the 3RM for storms.
-- **3RM -- INFORM Update** (Phase 2) --- Replacing CIRV with INFORM Risk
-  and Severity indices; methodology background, data pipeline, and
-  regression comparison.
-- **Appendices** --- Data merge pipeline (storm ID matching, exposure
-  joining) and exploration of ADAM/GDACS datasets.
+- **Monitoring Pipeline Exploration** --- real-time GDACS retrieval, GDACS
+  per-issuance episodes, NHC wind-speed probability polygons, GDACS-to-NHC
+  A-deck matching, and the PDC evaluation (initial, then revisited on the 2026
+  season).
+- **Exposure Method Comparison** --- CHD vs GDACS vs ADAM across magnitude and
+  classification, and the MAX methodology for producing one number from three.
+- **Appendices** --- the data merge pipeline (storm ID matching, exposure
+  joining), the ADAM/GDACS/CERF overlap analysis and its completeness
+  blockers, and a superseded two-source comparison kept for reference.
 
 ## Next Steps
 
-- **Sub-national analysis**: Move from national (ADM0) to sub-national
-  (ADM1/ADM2) exposure, which may better capture localised damage
-  patterns.
-- **Multi-hazard factors**: Incorporate rainfall and storm surge exposure
-  alongside wind, as many cyclone impacts come from flooding rather
-  than wind damage alone.
-- **Harmonise ensemble estimates**: Leverage the consolidated
-  multi-ensemble exposure product (GDACS + ADAM + CHD) once temporal
-  coverage gaps are resolved.
+- **Multi-hazard factors**: incorporate rainfall and storm surge exposure
+  alongside wind, since many cyclone impacts come from flooding rather than
+  wind damage alone.
+- **Resolve the historical gaps**: the GDACS 2016--2021 null-exposure rows and
+  ADAM's 2023 start date are the binding constraint on any long-record
+  comparison.
+- **Operationalise the harmonised estimate**: the MAX surface exists
+  subnationally, but choosing and publishing a single agreed figure is a
+  cross-agency decision, not only a methodological one.
+
+::: {.callout-note appearance="simple"}
+## The CERF allocation prediction work has moved
+
+This book previously included a *CERF Predictions* section replicating and
+extending the CERF rapid-response regression model (3RM) --- including whether
+cyclone exposure improves it, and whether INFORM indices can replace CIRV.
+That work now lives in
+[`OCHA-DAP/ds-cerf-allocation-patterns`](https://github.com/OCHA-DAP/ds-cerf-allocation-patterns),
+together with its data loaders, models and refresh scripts. See
+[ADR 0007](https://github.com/OCHA-DAP/ds-storm-impact-harmonisation/blob/main/docs/decisions/0007-move-the-3rm-work-to-its-own-repo.md).
+:::

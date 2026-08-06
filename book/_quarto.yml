@@ -7,18 +7,12 @@ project:
 
 book:
   title: "Storm Impact Harmonisation"
-  subtitle: "Linking CERF allocations with cyclone population exposure"
+  subtitle: "Reconciling cyclone population exposure across CHD, GDACS, ADAM and PDC"
   author: "**OCHA Data Science Unit:** Arno Z., Downing T., Ker H., Ndirangu P., Martini G., Milano L."
   sidebar:
     logo: logo_white.png
   chapters:
     - index.qmd
-    - part: "CERF Predictions"
-      chapters:
-        - 02b-analysis-cerf-api.qmd
-        - 02c-analysis-inform.qmd
-        - 02d-analysis-conflict.qmd
-        - 02e-country-differentiation.qmd
     - part: "Monitoring Pipeline Exploration"
       chapters:
         - 03-gdacs-realtime.qmd

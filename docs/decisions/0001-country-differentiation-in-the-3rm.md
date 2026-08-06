@@ -8,6 +8,14 @@ informed: []
 
 # Do not add country-level differentiation to the 3RM (for now)
 
+> **Moved.** The 3RM work this ADR governs left this repo — see
+> [ADR 0007](0007-move-the-3rm-work-to-its-own-repo.md). The live copy is in
+> [`OCHA-DAP/ds-cerf-allocation-patterns`](https://github.com/OCHA-DAP/ds-cerf-allocation-patterns)
+> at `docs/decisions/0001-country-differentiation-in-the-3rm.md`, with paths and
+> chapter numbers updated for that repo. Amend it there, not here. This copy is
+> kept as the historical record of a decision taken in this repo; the file and
+> chapter paths it cites (`src/models/…`, `book/02b`–`02e`) no longer exist here.
+
 ## Context and Problem Statement
 
 The CERF Rapid-Response Regression Model (3RM; Rost 2025, replicated and

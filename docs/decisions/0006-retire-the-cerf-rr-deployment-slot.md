@@ -8,6 +8,12 @@ informed: OCHA CHD Data Science team
 
 # Retire the cerf-rr deployment slot; the CERF predictor is now a production repo
 
+> **Option D has since been executed.** This ADR retired the deployment but
+> deferred removing `app/cerf_predictor.py`. That removal happened in
+> [ADR 0007](0007-move-the-3rm-work-to-its-own-repo.md), which moved the whole
+> 3RM section out of this repo. The "two copies may drift" risk recorded below
+> is therefore closed.
+
 ## Context and Problem Statement
 
 The CERF rapid-response allocation estimator (`app/cerf_predictor.py`) was
