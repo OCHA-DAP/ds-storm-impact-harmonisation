@@ -175,11 +175,27 @@ def fetch_pdc_for_storms(active: pd.DataFrame, allow_missing: bool = False) -> d
 
     print(f"  PDC active cyclones: {len(records)}", flush=True)
     for _, storm in active.iterrows():
-        rec = pdc_mod.match_gdacs_name(storm["name"], records)
-        if rec is None:
-            # A real state of the world, not a failure.
+        # Position, not name, is the matching key: GDACS keeps a storm's
+        # pre-naming designation (ONE-C-26) while PDC adopts the assigned
+        # name (Tropical Storm Lala), so names diverge exactly for storms
+        # named mid-life. Both feeds republish the agency advisory
+        # position, so proximity is near-exact.
+        match = pdc_mod.match_gdacs_storm(storm["lat"], storm["lon"], records)
+        if match is None:
+            # A real state of the world, not a failure: PDC closes a
+            # cyclone once the agency stops issuing advisories, while
+            # GDACS keeps the event active through its date window.
             print(f"    {storm['name']}: not in PDC's feed", flush=True)
             continue
+        rec = match["record"]
+        if not pdc_mod.names_agree(storm["name"], rec.get("name", "")):
+            print(
+                f"    NOTE {storm['name']}: matched PDC {rec.get('name')!r} "
+                f"by position ({match['distance_km']:.0f} km) but the names "
+                f"disagree — expected when GDACS kept a pre-naming "
+                f"designation, worth a look otherwise",
+                flush=True,
+            )
         try:
             detail = pdc_mod.fetch_detail(rec["uuid"])
             meta = pdc_mod.parse_meta(detail)

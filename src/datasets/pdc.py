@@ -42,6 +42,7 @@ Schema traps handled here
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from typing import Any
@@ -109,12 +110,36 @@ def _headers() -> dict[str, str]:
     return {"x-api-key": key}
 
 
-def fetch_active_cyclones() -> list[dict]:
-    """Live `GET /hazards?types=CYCLONE` — the list-view properties.
+def _list_records(feature_collection: dict) -> list[dict]:
+    """Flatten a `/hazards` FeatureCollection into per-hazard records.
 
-    Returns the `properties` dict of each feature (uuid, name, type,
-    severity, category, startedAt/updatedAt/endedAt). Use
-    :func:`fetch_detail` on a `uuid` for exposure and track.
+    Each record is the feature's `properties` dict plus `latitude` /
+    `longitude` from its Point geometry — the position is what
+    :func:`match_gdacs_storm` matches on, so a feature without one is a
+    schema violation, not an ignorable gap.
+    """
+    records = []
+    for f in feature_collection.get("features", []):
+        props = dict(f.get("properties", {}))
+        geom = f.get("geometry") or {}
+        coords = geom.get("coordinates") if geom.get("type") == "Point" else None
+        if not coords:
+            raise ValueError(
+                f"PDC hazard {props.get('name')!r} (uuid={props.get('uuid')!r}) "
+                f"has no Point geometry — cannot match by position"
+            )
+        props["longitude"], props["latitude"] = coords[0], coords[1]
+        records.append(props)
+    return records
+
+
+def fetch_active_cyclones() -> list[dict]:
+    """Live `GET /hazards?types=CYCLONE` — the list-view records.
+
+    Returns each feature's `properties` dict (uuid, name, type, severity,
+    category, startedAt/updatedAt/endedAt) plus `latitude`/`longitude`
+    from its geometry. Use :func:`fetch_detail` on a `uuid` for exposure
+    and track.
     """
     r = requests.get(
         f"{PDC_BASE}/hazards",
@@ -123,7 +148,7 @@ def fetch_active_cyclones() -> list[dict]:
         timeout=TIMEOUT,
     )
     r.raise_for_status()
-    return [f.get("properties", {}) for f in r.json().get("features", [])]
+    return _list_records(r.json())
 
 
 def fetch_detail(hazard_uuid: str) -> dict:
@@ -153,22 +178,58 @@ def _name_key(name: str) -> str:
     return re.sub(r"[^A-Z]", "", n)
 
 
-def match_gdacs_name(gdacs_name: str, pdc_records: list[dict]) -> dict | None:
-    """Find the PDC record for a GDACS storm name, or None.
+def names_agree(gdacs_name: str, pdc_name: str) -> bool:
+    """Whether two storm names reduce to the same bare token.
 
-    Matches on the bare storm token. Only `category == "EVENT"` records are
-    considered: `RESPONSE` records are analyst-entered coordination snapshots
-    whose exposure is unfit for quantitative use (see `docs/pdc_api.md`).
+    A corroboration signal for :func:`match_gdacs_storm`, not a matching
+    key: GDACS keeps a storm's pre-naming designation ("ONE-C-26") for the
+    event's whole lifetime while PDC adopts the agency-assigned name
+    ("Tropical Storm Lala"), so for exactly the storms that get named
+    mid-life the names of one physical storm never agree.
     """
     key = _name_key(gdacs_name)
-    if not key:
-        return None
+    return bool(key) and key == _name_key(pdc_name)
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    rlat1, rlon1, rlat2, rlon2 = map(math.radians, (lat1, lon1, lat2, lon2))
+    a = (
+        math.sin((rlat2 - rlat1) / 2) ** 2
+        + math.cos(rlat1) * math.cos(rlat2) * math.sin((rlon2 - rlon1) / 2) ** 2
+    )
+    return 2 * 6371.0 * math.asin(math.sqrt(a))
+
+
+# Both feeds republish the same agency advisory position, so an in-sync pair
+# is metres apart and an out-of-sync pair is off by one 6-hour advisory step
+# (~200 km for a fast storm). Simultaneous cyclones in one basin sit many
+# hundreds of km apart, so 500 km is generous without being ambiguous.
+MATCH_MAX_KM = 500.0
+
+
+def match_gdacs_storm(
+    lat: float, lon: float, pdc_records: list[dict], max_km: float = MATCH_MAX_KM
+) -> dict | None:
+    """Find the PDC record for a GDACS storm position, or None.
+
+    Returns ``{"record": <pdc record>, "distance_km": <float>}`` for the
+    nearest `category == "EVENT"` record within `max_km`, or None if no
+    EVENT record is that close. `RESPONSE` records are excluded: they are
+    analyst-entered coordination snapshots whose exposure is unfit for
+    quantitative use (see `docs/pdc_api.md`).
+
+    Callers should corroborate the match with :func:`names_agree` and
+    surface disagreements — expected for designation-stage storms, but
+    worth a loud log line.
+    """
+    best = None
     for rec in pdc_records:
         if rec.get("category") != "EVENT":
             continue
-        if _name_key(rec.get("name", "")) == key:
-            return rec
-    return None
+        dist = _haversine_km(lat, lon, rec["latitude"], rec["longitude"])
+        if dist <= max_km and (best is None or dist < best["distance_km"]):
+            best = {"record": rec, "distance_km": dist}
+    return best
 
 
 def list_captured_versions(stage: str = "dev") -> pd.DataFrame:

@@ -30,8 +30,15 @@ dev = [
     "contextily>=1.7.0",
     "jupyter>=1.1.1",
     "plotly>=6.7.0",
+    "pytest>=9.1.1",
     "ruff>=0.15.5",
 ]
+
+[tool.pytest.ini_options]
+# `src` is a plain directory, not an installed package; scripts import it
+# relative to the repo root, so tests must too.
+pythonpath = ["."]
+testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 88
