@@ -44,6 +44,7 @@ from src.gdacs_monitor_email import (  # noqa: E402
     build_email_html,
     build_stub_html,
     load_ocha_historical,
+    sort_storms_by_exposure,
 )
 
 load_dotenv()
@@ -273,6 +274,9 @@ def main():
     print("Step 1: fetch active storms + per-country exposure...", flush=True)
     active, exposure = fetch_active_exposure()
     print(f"  active storms: {len(active)}; exposure rows: {len(exposure)}", flush=True)
+    # Sorted here, before the subject line and the cards are built, so the
+    # email leads with the biggest storm in both.
+    active = sort_storms_by_exposure(active, exposure)
 
     if active.empty:
         print("Step 2: no active storms — stub email.", flush=True)
