@@ -559,6 +559,30 @@ def _footer_html() -> str:
     )
 
 
+def sort_storms_by_exposure(
+    active_storms: pd.DataFrame, exposure: pd.DataFrame,
+) -> pd.DataFrame:
+    """Order storms by total people exposed, largest first.
+
+    A storm's figure is the sum over its countries of each country's max
+    across wind thresholds — the same per-country figure the card's
+    country ordering uses; summing every threshold row instead would
+    double-count nested wind footprints. Storms with no exposure rows are
+    genuinely exposing nobody and sort last; ties keep GDACS's order.
+
+    Reorders whole storms only. Country blocks within a card are composed
+    per storm in `_storm_section_html`, so a country's plots are never
+    split across positions by this sort.
+    """
+    if active_storms.empty or exposure.empty:
+        return active_storms
+    per_country = exposure.groupby(["eventid", "iso3"])["pop_affected"].max()
+    totals = per_country.groupby("eventid").sum()
+    keys = active_storms["eventid"].map(totals).fillna(0)
+    order = keys.sort_values(ascending=False, kind="stable").index
+    return active_storms.loc[order].reset_index(drop=True)
+
+
 def build_email_html(
     active_storms: pd.DataFrame, exposure: pd.DataFrame,
     historical: pd.DataFrame, timestamp: datetime,
