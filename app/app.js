@@ -355,10 +355,12 @@ function renderTable() {
 /* ---------------------------------------------------------- track map */
 
 // Esri light-grey canvas: key-free. CARTO's light_all raster tiles now return
-// an "API KEY REQUIRED" watermark without a key. Note the {z}/{y}/{x} order.
+// an "API KEY REQUIRED" watermark without a key. Note the {z}/{y}/{x} order;
+// z17+ is a "not yet available" placeholder, hence maxZoom 16. Esri lists this
+// basemap as mature support, retiring December 2029.
 const basemap = () => L.tileLayer(
   "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}", {
-    attribution: "Tiles &copy; Esri &mdash; Esri, HERE, Garmin, OpenStreetMap contributors",
+    attribution: "Tiles &copy; Esri &mdash; Esri, HERE, Garmin, &copy; OpenStreetMap contributors, and the GIS user community",
     maxZoom: 16,
   });
 
