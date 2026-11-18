@@ -354,13 +354,19 @@ function renderTable() {
 
 /* ---------------------------------------------------------- track map */
 
+// Esri light-grey canvas: key-free. CARTO's light_all raster tiles now return
+// an "API KEY REQUIRED" watermark without a key. Note the {z}/{y}/{x} order.
+const basemap = () => L.tileLayer(
+  "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}", {
+    attribution: "Tiles &copy; Esri &mdash; Esri, HERE, Garmin, OpenStreetMap contributors",
+    maxZoom: 16,
+  });
+
 async function renderTrackMap() {
   if (!$("trackDetails").open) return;
   if (!trackMap) {
     trackMap = L.map("trackMap", { scrollWheelZoom: false });
-    L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
-      attribution: "&copy; OpenStreetMap &copy; CARTO", subdomains: "abcd",
-    }).addTo(trackMap);
+    basemap().addTo(trackMap);
   }
   trackMap.invalidateSize();
   const iso3 = S.iso3;
@@ -715,9 +721,7 @@ function renderIssuedBar(t, thr, rowAt) {
 async function renderBufferMap(t) {
   if (!bufferMap) {
     bufferMap = L.map("bufferMap", { scrollWheelZoom: false });
-    L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
-      attribution: "&copy; OpenStreetMap &copy; CARTO", subdomains: "abcd",
-    }).addTo(bufferMap);
+    basemap().addTo(bufferMap);
     bufferLayerGroup = L.featureGroup().addTo(bufferMap);
   }
   bufferMap.invalidateSize();
