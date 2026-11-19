@@ -91,6 +91,14 @@ forward and missed polls are unrecoverable — see
 `docs/decisions/0005-capture-pdc-cyclones-without-integrating-them.md`.
 Parsing lives in `src/datasets/pdc.py`; reference in `docs/pdc_api.md`.
 
+## Compare app data (Pages /compare/)
+
+The Pages deploy (`.github/workflows/deploy-app.yml`) downloads the app's data
+from dev blob (`ds-storm-impact-harmonisation/processed/app_data/app_data.tar.gz`)
+instead of querying the DB, which GitHub runners cannot reach. To refresh it:
+export over the DB tunnel, upload, then run the workflow by hand; the steps are
+in `scripts/upload_app_data.py`.
+
 ## ocha_stratus — Azure Blob & Database Access
 
 The internal `ocha_stratus` package (repo: `OCHA-DAP/ocha-stratus`) provides helpers for reading/writing data to Azure Blob Storage and Azure PostgreSQL. Install with `uv add ocha-stratus` (available on the OCHA-DAP private index or GitHub).

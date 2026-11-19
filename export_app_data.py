@@ -3,6 +3,9 @@
 One-off (rerun when the DB updates):
     uv run python export_app_data.py
 
+The DB is private-endpoint only, so run this over the DB tunnel and then
+publish with scripts/upload_app_data.py (its docstring has the steps).
+
 Writes to app/data/:
     core.json            countries, storms, forecast/obsv/external series, finals
     tracks/{iso3}.json   IBTrACS track polylines for that country's storms
@@ -10,6 +13,7 @@ Writes to app/data/:
 """
 
 import json
+import shutil
 from pathlib import Path
 
 import geopandas as gpd
@@ -276,6 +280,9 @@ def export_buffers(engine) -> None:
 
 if __name__ == "__main__":
     engine = stratus.get_engine(stage=STAGE)
+    # app/data/ is wholly generated: clear it so files for storms that left the
+    # DB don't linger and get uploaded by scripts/upload_app_data.py.
+    shutil.rmtree(OUT, ignore_errors=True)
     export_core(engine)
     export_buffers(engine)
     print("done")

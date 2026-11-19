@@ -101,15 +101,17 @@ overwritten page.
 ## How it deploys
 
 `.github/workflows/deploy-app.yml` runs on push to `main` (paths `app/**`,
-`pages/**`), daily at 06:00 UTC, and on manual dispatch. It exports the
-comparison app's data from the database, runs `assemble.py`, and publishes the
-result.
+`pages/**`, the workflow itself) and on manual dispatch; it has no schedule. It
+downloads the comparison app's data archive from dev blob into `app/data/`, runs
+`assemble.py`, and publishes the result. GitHub runners cannot reach the
+database, so the export runs over the DB tunnel and is uploaded with
+`scripts/upload_app_data.py`; run the workflow by hand after an upload.
 
 The workflow does not name individual products. The one exception is the
-comparison app's database export, which is a product-specific build step; a
+comparison app's data download, which is a product-specific build step; a
 future product needing its own build step would require a workflow edit. This is
 deliberate — manifests declare data, not commands to run, because that job holds
-database credentials.
+a blob read token.
 
 ## Files
 
