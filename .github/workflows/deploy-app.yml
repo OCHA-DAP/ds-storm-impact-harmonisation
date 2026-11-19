@@ -48,7 +48,8 @@ jobs:
           test -n "$SAS" || { echo "::error::DSCI_AZ_BLOB_DEV_SAS org secret is not visible to this repo"; exit 1; }
           # Written by scripts/upload_app_data.py; keep the path in step with it.
           url="https://imb0chd0dev.blob.core.windows.net/projects/ds-storm-impact-harmonisation/processed/app_data/app_data.tar.gz"
-          curl -fsS "$url?${SAS#\?}" | tar -xz -C app
+          # Extract only data/, so the archive can never overwrite the app's code.
+          curl -fsS "$url?${SAS#\?}" | tar -xz -C app data
           test -f app/data/core.json
           echo "app data: $(find app/data -type f | wc -l) files"
 

@@ -47,9 +47,12 @@ cp .env.example .env  # fill in Azure credentials
   `app/data/` (gitignored):
 
   ```
-  uv run python export_app_data.py   # regenerate app/data/ from the DB
+  uv run python export_app_data.py   # regenerate app/data/ from the DB (via the DB tunnel)
   cd app && python3 -m http.server 8590   # or any static file server
   ```
+
+  The deployed site does not query the DB: it serves an archive of `app/data/`
+  from dev blob. To publish fresh data, follow `scripts/upload_app_data.py`.
 
 - `adm0_exp_app.py` — marimo storm exposure map app (deployed to Azure).
 - `storm_impact_app.py` — marimo NHC storm impact app (track buffers, WSP).
@@ -71,4 +74,4 @@ cp .env.example .env  # fill in Azure credentials
 |---|---|---|
 | `daily-gdacs-monitor-email.yml` | 6-hourly (03/09/15/21 UTC) | Renders and sends the GDACS storm monitor email via Listmonk |
 | `pdc-cyclone-poll.yml` | 3-hourly | Archives raw PDC cyclone responses to blob. PDC serves no archive and no track history, so missed polls are unrecoverable — see ADR 0005 |
-| `deploy-app.yml` | push / schedule | Exports app data and deploys the Pages site |
+| `deploy-app.yml` | push to `main` / manual | Downloads the app data archive from blob and deploys the Pages site (not scheduled) |

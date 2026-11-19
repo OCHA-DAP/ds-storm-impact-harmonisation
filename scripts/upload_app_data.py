@@ -5,8 +5,9 @@ off (2026-09-30), so the deploy workflow no longer runs export_app_data.py.
 Instead the export runs on a laptop over the Databricks SSH tunnel, and this
 script parks the result on blob as one archive that the workflow downloads:
 
-    eval "$(db-tunnel env)"                  # DSCI_AZ_DB_DEV_HOST -> tunnel
-    uv run python export_app_data.py         # DB -> app/data/
+    # Open the DB tunnel (internal KB infrastructure/local-db-access.md), then
+    export DSCI_AZ_DB_DEV_HOST=127.0.0.1:<dev tunnel port>
+    uv run python export_app_data.py         # DB -> app/data/ (cleared first)
     uv run python scripts/upload_app_data.py # app/data/ -> blob
     gh workflow run deploy-app.yml           # blob -> Pages
 

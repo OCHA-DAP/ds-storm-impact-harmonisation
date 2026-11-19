@@ -13,6 +13,7 @@ Writes to app/data/:
 """
 
 import json
+import shutil
 from pathlib import Path
 
 import geopandas as gpd
@@ -279,6 +280,9 @@ def export_buffers(engine) -> None:
 
 if __name__ == "__main__":
     engine = stratus.get_engine(stage=STAGE)
+    # app/data/ is wholly generated: clear it so files for storms that left the
+    # DB don't linger and get uploaded by scripts/upload_app_data.py.
+    shutil.rmtree(OUT, ignore_errors=True)
     export_core(engine)
     export_buffers(engine)
     print("done")
