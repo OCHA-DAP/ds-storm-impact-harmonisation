@@ -3,6 +3,9 @@
 One-off (rerun when the DB updates):
     uv run python export_app_data.py
 
+The DB is private-endpoint only, so run this over the DB tunnel and then
+publish with scripts/upload_app_data.py (its docstring has the steps).
+
 Writes to app/data/:
     core.json            countries, storms, forecast/obsv/external series, finals
     tracks/{iso3}.json   IBTrACS track polylines for that country's storms
